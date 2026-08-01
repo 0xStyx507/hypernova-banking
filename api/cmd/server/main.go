@@ -21,9 +21,11 @@ import (
 	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 	"github.com/tigerbeetle/tigerbeetle-go/pkg/types"
 
+	"github.com/hypernova-banking/api/internal/assistant"
 	"github.com/hypernova-banking/api/internal/auth"
 	"github.com/hypernova-banking/api/internal/db"
 	"github.com/hypernova-banking/api/internal/ledger"
+	"github.com/hypernova-banking/api/internal/mcp"
 )
 
 // healthResponse is the stable public shape used by all phase-0 probes.
@@ -94,7 +96,10 @@ func main() {
 		AccessTTL:  durationFromEnv("AUTH_ACCESS_TTL", 15*time.Minute),
 		RefreshTTL: durationFromEnv("AUTH_REFRESH_TTL", 7*24*time.Hour),
 	})
-	server := newHTTPServer(apiPort(os.Getenv("API_PORT")), newRouter(authService, dependencyReadiness{database: persistence, ledger: ledgerService}, ledgerService))
+	mcpService := mcp.NewService(persistence, ledgerService)
+	mcpClient := mcp.NewClient(mcp.ClientConfig{BaseURL: "http://127.0.0.1:" + apiPort(os.Getenv("API_PORT")) + "/api/v1/mcp"})
+	assistantService := assistant.NewService(assistant.LocalProvider{}, mcpClient)
+	server := newHTTPServer(apiPort(os.Getenv("API_PORT")), newRouterWithServices(authService, dependencyReadiness{database: persistence, ledger: ledgerService}, ledgerService, mcpService, assistantService))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -168,7 +173,15 @@ type readinessChecker interface {
 
 // newRouter wires phase-1 identity routes while keeping health and readiness
 // separate: liveness confirms the process, readiness confirms PostgreSQL.
-func newRouter(authService *auth.Service, readiness readinessChecker, ledgerService *ledger.Service) http.Handler {
+func newRouter(authService *auth.Service, readiness readinessChecker, ledgerService *ledger.Service, mcpServices ...*mcp.Service) http.Handler {
+	var mcpService *mcp.Service
+	if len(mcpServices) > 0 {
+		mcpService = mcpServices[0]
+	}
+	return newRouterWithServices(authService, readiness, ledgerService, mcpService, nil)
+}
+
+func newRouterWithServices(authService *auth.Service, readiness readinessChecker, ledgerService *ledger.Service, mcpService *mcp.Service, assistantService *assistant.Service) http.Handler {
 	router := chi.NewRouter()
 	router.Get(healthPath, healthHandler)
 	router.Get(readinessPath, readinessHandler(readiness))
@@ -178,6 +191,12 @@ func newRouter(authService *auth.Service, readiness readinessChecker, ledgerServ
 	}
 	if authService != nil && ledgerService != nil {
 		registerLedgerRoutes(router, authService, ledgerService)
+	}
+	if authService != nil && mcpService != nil {
+		registerMCPRoutes(router, authService, mcpService, ledgerService)
+	}
+	if authService != nil && assistantService != nil {
+		registerAssistantRoutes(router, authService, assistantService)
 	}
 	return router
 }

@@ -8,7 +8,7 @@ La base funcional incluye migraciones PostgreSQL, seed de usuarios, passwords
 hasheadas, sesiones opacas y operaciones financieras respaldadas por
 TigerBeetle.
 
-La fuente de verdad financiera será TigerBeetle. PostgreSQL se reservará para identidad, sesiones, auditoría y metadatos.
+La fuente de verdad financiera será TigerBeetle. PostgreSQL se reservará para identidad, sesiones, auditoría, metadatos y acciones preparadas de MCP.
 
 El registro provisiona una cuenta HNL de checking. Los depósitos son una
 capacidad de demostración local controlada por `LEDGER_ALLOW_DEMO_DEPOSITS`;
@@ -111,6 +111,15 @@ Endpoints financieros:
 Las mutaciones financieras requieren `Authorization: Bearer <access_token>` e
 `Idempotency-Key`. Los importes se envían como cadenas de unidades menores;
 actualmente solo se admite HNL.
+
+La superficie autenticada de MCP expone herramientas de lectura y acciones
+financieras con el flujo `prepare → confirm` o `cancel`. Preparar no modifica
+el ledger; confirmar exige el cuerpo exacto `{ "confirmation": "CONFIRM" }` y
+usa el ID preparado como clave idempotente.
+
+El chat autenticado (`POST /api/v1/chat/messages`) usa un proveedor local
+determinista y un cliente MCP HTTP. Puede consultar saldo mediante herramientas
+de solo lectura; nunca ejecuta una mutación directamente desde el mensaje.
 
 El contrato OpenAPI versionado se encuentra en [`docs/openapi.yaml`](docs/openapi.yaml).
 

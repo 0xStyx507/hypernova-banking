@@ -22,7 +22,9 @@ financiero respaldado por TigerBeetle.
 - TigerBeetle: cuentas, transferencias y balances; será la única fuente de verdad financiera.
 - API: validación, autorización, casos de uso y contratos HTTP.
 - Web y mobile: presentación y consumo de contratos; nunca deciden reglas financieras.
-- IA/MCP: se incorporarán después con prepare/confirm/cancel en servidor.
+- IA/MCP: usa herramientas autenticadas y una frontera persistida
+  `prepare/confirm/cancel`; ninguna acción financiera se ejecuta desde texto
+  libre sin confirmación explícita.
 
 ## Validación de fase 0
 
@@ -48,7 +50,7 @@ identificador de transferencia cuando se reintentan.
 
 La superficie HTTP versionada de esta fase se mantiene en
 [`openapi.yaml`](openapi.yaml), que es el contrato compartido por API, web y
-mobile.
+mobile y clientes MCP.
 
 El baseline de seguridad y riesgos se documenta en
 [`compliance/iso-27001-baseline.md`](compliance/iso-27001-baseline.md), con el

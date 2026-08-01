@@ -1,12 +1,12 @@
 openapi: 3.0.3
 info:
   title: Hypernova Banking API
-  version: 1.0.0-phase-2
+  version: 1.0.0-phase-4
   license:
     name: Proprietary technical assessment implementation
     url: https://github.com/0xStyx507/hypernova-banking
   description: |
-    Contrato HTTP de la fase 2 de Hypernova Banking.
+    Contrato HTTP de Hypernova Banking.
 
     Incluye identidad, sesiones, auditoría, cuentas HNL y movimientos
     financieros respaldados por TigerBeetle. Los importes son unidades menores
@@ -24,6 +24,10 @@ tags:
     description: Registro y gestión de sesiones
   - name: Ledger
     description: Cuentas y movimientos financieros respaldados por TigerBeetle
+  - name: MCP
+    description: Herramientas autenticadas con preparación y confirmación explícita
+  - name: Assistant
+    description: Chat autenticado con proveedor local y herramientas MCP de solo lectura
 paths:
   /healthz:
     get:
@@ -374,6 +378,129 @@ paths:
         '422':
           description: Fondos insuficientes o cuenta inválida
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/tools:
+    get:
+      operationId: listMCPTools
+      summary: Lista herramientas disponibles para el cliente asistido
+      description: Las herramientas de lectura son seguras para consulta; las mutaciones siempre requieren una acción preparada y confirmación explícita.
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Herramientas disponibles
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPToolsResponse' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/tools/call:
+    post:
+      operationId: callMCPTool
+      summary: Ejecuta una consulta MCP o prepara una intención
+      description: Las consultas no mutan el ledger; prepare_financial_action solo crea una acción pendiente.
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MCPToolCallRequest' } } }
+      responses:
+        '200':
+          description: Resultado de la herramienta
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPToolCallResponse' } } }
+        '400':
+          description: Herramienta o argumentos inválidos
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Herramienta inexistente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions:
+    post:
+      operationId: prepareMCPAction
+      summary: Prepara una acción financiera sin ejecutarla
+      description: Persiste una intención por cinco minutos. No cambia el saldo ni crea una transferencia en TigerBeetle.
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MCPActionRequest' } } }
+      responses:
+        '201':
+          description: Acción lista para confirmación
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPAction' } } }
+        '400':
+          description: Acción inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions/{action_id}:
+    get:
+      operationId: getMCPAction
+      summary: Consulta el estado de una acción preparada
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ActionID'
+      responses:
+        '200':
+          description: Acción preparada
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPAction' } } }
+        '404':
+          description: Acción inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions/{action_id}/confirm:
+    post:
+      operationId: confirmMCPAction
+      summary: Confirma y ejecuta una acción financiera
+      description: 'Requiere el cuerpo exacto { confirmation: CONFIRM }. El ID de la acción se reutiliza como clave idempotente.'
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ActionID'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MCPConfirmationRequest' } } }
+      responses:
+        '200':
+          description: Acción ejecutada
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPAction' } } }
+        '400':
+          description: Falta confirmación explícita
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: Acción no puede confirmarse en su estado actual
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions/{action_id}/cancel:
+    post:
+      operationId: cancelMCPAction
+      summary: Cancela una acción antes de su ejecución
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ActionID'
+      responses:
+        '200':
+          description: Acción cancelada
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPAction' } } }
+        '409':
+          description: Acción ya confirmada o en estado incompatible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/chat/messages:
+    post:
+      operationId: sendChatMessage
+      summary: Envía un mensaje al asistente bancario
+      description: El proveedor local puede consultar herramientas de solo lectura; las operaciones financieras siempre requieren el flujo MCP de preparación y confirmación.
+      tags: [Assistant]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ChatRequest' } } }
+      responses:
+        '200':
+          description: Respuesta del asistente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ChatResponse' } } }
+        '400':
+          description: Mensaje inválido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '502':
+          description: Asistente o MCP no disponible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
 components:
   securitySchemes:
     bearerAuth:
@@ -568,6 +695,79 @@ components:
           items: { $ref: '#/components/schemas/Transaction' }
         has_more: { type: boolean }
         next_cursor: { type: string }
+    MCPTool:
+      type: object
+      required: [name, read_only, description]
+      properties:
+        name: { type: string }
+        read_only: { type: boolean }
+        description: { type: string }
+    MCPToolsResponse:
+      type: object
+      required: [protocol, tools]
+      properties:
+        protocol: { type: string, example: hypernova-mcp-http/1 }
+        tools:
+          type: array
+          items: { $ref: '#/components/schemas/MCPTool' }
+    MCPActionRequest:
+      type: object
+      additionalProperties: false
+      required: [action, amount]
+      properties:
+        action: { type: string, enum: [deposit, withdrawal, transfer] }
+        account_id: { type: string, format: uuid }
+        source_account_id: { type: string, format: uuid }
+        destination_account_id: { type: string, format: uuid }
+        amount: { type: string, pattern: '^[1-9][0-9]*$' }
+        currency: { type: string, enum: [HNL], default: HNL }
+        reason: { type: string, maxLength: 280 }
+    MCPConfirmationRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation: { type: string, enum: [CONFIRM] }
+    MCPToolCallRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, example: get_accounts }
+        arguments:
+          type: object
+          additionalProperties: true
+    MCPToolCallResponse:
+      type: object
+      required: [name, result]
+      properties:
+        name: { type: string }
+        result: {}
+    ChatRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message: { type: string, minLength: 1, maxLength: 2000 }
+    ChatResponse:
+      type: object
+      required: [message, requires_confirmation]
+      properties:
+        message: { type: string }
+        requires_confirmation: { type: boolean }
+        read_only_data: {}
+    MCPAction:
+      type: object
+      required: [id, action, status, payload, expires_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string, enum: [deposit, withdrawal, transfer] }
+        status: { type: string, enum: [ready, confirming, confirmed, cancelled, expired, failed] }
+        payload: { $ref: '#/components/schemas/MCPActionRequest' }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        confirmed_at: { type: string, format: date-time }
+        operation: { $ref: '#/components/schemas/Operation' }
   parameters:
     AccountID:
       name: account_id
@@ -579,3 +779,8 @@ components:
       in: header
       required: true
       schema: { type: string, minLength: 1, maxLength: 128 }
+    ActionID:
+      name: action_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }

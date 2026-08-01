@@ -45,7 +45,7 @@ services:
       TIGERBEETLE_ADDRESS: ${TIGERBEETLE_ADDRESS:-tigerbeetle:3000}
       # This is an explicit local-demo clearing channel. Production must set
       # LEDGER_ALLOW_DEMO_DEPOSITS=false and use a trusted funding workflow.
-      LEDGER_ALLOW_DEMO_DEPOSITS: ${LEDGER_ALLOW_DEMO_DEPOSITS:-true}
+      LEDGER_ALLOW_DEMO_DEPOSITS: ${LEDGER_ALLOW_DEMO_DEPOSITS:-false}
       AUTH_ACCESS_TTL: ${AUTH_ACCESS_TTL:-15m}
       AUTH_REFRESH_TTL: ${AUTH_REFRESH_TTL:-168h}
     ports:
