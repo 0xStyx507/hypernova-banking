@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hypernova-banking/api/internal/auth"
+	"github.com/hypernova-banking/api/internal/ledger"
 )
 
 type registerRequest struct {
@@ -45,10 +46,15 @@ type tokensResponse struct {
 	RefreshExpiresAt time.Time    `json:"refresh_expires_at"`
 }
 
-// registerAuthRoutes exposes only the phase-1 identity operations. Financial
-// operations are intentionally absent until their TigerBeetle use cases exist.
-func registerAuthRoutes(router chi.Router, service *auth.Service) {
-	handler := authHandler{service: service}
+type registrationResponse struct {
+	User    userResponse       `json:"user"`
+	Account ledger.AccountView `json:"account"`
+}
+
+// registerAuthRoutes exposes identity operations and provisions the default
+// financial account as part of successful registration.
+func registerAuthRoutes(router chi.Router, service *auth.Service, ledgerService *ledger.Service) {
+	handler := authHandler{service: service, ledgerService: ledgerService}
 	router.Route("/api/v1/auth", func(router chi.Router) {
 		router.Post("/register", handler.register)
 		router.Post("/login", handler.login)
@@ -58,7 +64,8 @@ func registerAuthRoutes(router chi.Router, service *auth.Service) {
 }
 
 type authHandler struct {
-	service *auth.Service
+	service       *auth.Service
+	ledgerService *ledger.Service
 }
 
 func (h authHandler) register(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +88,16 @@ func (h authHandler) register(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, http.StatusCreated, userResponseFrom(user))
+	if h.ledgerService == nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, "ledger_unavailable", "financial ledger unavailable")
+		return
+	}
+	account, err := h.ledgerService.CreateAccount(ctx, user.ID, "HNL", ledger.RequestMetadata{IPAddress: requestMetadata(r).IPAddress, UserAgent: requestMetadata(r).UserAgent})
+	if err != nil {
+		writeLedgerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, registrationResponse{User: userResponseFrom(user), Account: account})
 }
 
 func (h authHandler) login(w http.ResponseWriter, r *http.Request) {
@@ -187,5 +203,22 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	code := "internal_error"
+	switch message {
+	case "invalid request":
+		code = "invalid_request"
+	case "invalid registration data":
+		code = "invalid_registration"
+	case "email already in use":
+		code = "email_already_in_use"
+	case "invalid login data":
+		code = "invalid_login"
+	case "invalid credentials":
+		code = "invalid_credentials"
+	case "invalid refresh token":
+		code = "invalid_refresh_token"
+	case "authentication required":
+		code = "authentication_required"
+	}
+	writeJSON(w, status, map[string]string{"error": message, "code": code})
 }

@@ -31,6 +31,8 @@ var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	// ErrInvalidRefreshToken is deliberately generic to avoid token probing.
 	ErrInvalidRefreshToken = errors.New("invalid refresh token")
+	// ErrInvalidAccessToken is deliberately generic to avoid session probing.
+	ErrInvalidAccessToken = errors.New("invalid access token")
 )
 
 const (
@@ -318,6 +320,28 @@ func (s *Service) Logout(ctx context.Context, accessToken string, metadata Reque
 		return fmt.Errorf("commit logout: %w", err)
 	}
 	return nil
+}
+
+// Authenticate resolves an active bearer token to its user. Access tokens are
+// opaque hashes in PostgreSQL and are never returned by this lookup.
+func (s *Service) Authenticate(ctx context.Context, accessToken string) (uuid.UUID, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(accessToken) == "" {
+		return uuid.Nil, ErrInvalidAccessToken
+	}
+	var userID uuid.UUID
+	err := s.pool.QueryRow(ctx, `
+		UPDATE sessions
+		SET last_used_at = NOW()
+		WHERE access_token_hash = $1
+		  AND revoked_at IS NULL
+		  AND access_expires_at > NOW()
+		  AND EXISTS (SELECT 1 FROM users WHERE users.id = sessions.user_id AND users.active)
+		RETURNING user_id
+	`, tokenHash(accessToken)).Scan(&userID)
+	if err != nil {
+		return uuid.Nil, ErrInvalidAccessToken
+	}
+	return userID, nil
 }
 
 func (s *Service) createSession(ctx context.Context, executor audit.Executor, user User, metadata RequestMetadata, event string) (Tokens, error) {

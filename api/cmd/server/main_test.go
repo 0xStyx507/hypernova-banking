@@ -9,7 +9,7 @@ import (
 )
 
 func TestHealthEndpoints(t *testing.T) {
-	router := newRouter(nil, readyReadiness{})
+	router := newRouter(nil, readyReadiness{}, nil)
 	paths := []string{"/healthz", "/readyz", "/api/v1/health"}
 
 	for _, path := range paths {
@@ -37,7 +37,7 @@ func TestHealthEndpoints(t *testing.T) {
 }
 
 func TestReadinessFailsWithoutDatabase(t *testing.T) {
-	router := newRouter(nil, nil)
+	router := newRouter(nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, req)
@@ -52,6 +52,15 @@ func TestAPIPort(t *testing.T) {
 	}
 	if got := apiPort("9090"); got != "9090" {
 		t.Fatalf("expected configured port, got %q", got)
+	}
+}
+
+func TestResolveLedgerAddress(t *testing.T) {
+	if got, err := resolveLedgerAddress("127.0.0.1:3000"); err != nil || got != "127.0.0.1:3000" {
+		t.Fatalf("expected numeric ledger address, got %q, %v", got, err)
+	}
+	if _, err := resolveLedgerAddress("not-an-address"); err == nil {
+		t.Fatal("expected malformed ledger address to fail")
 	}
 }
 

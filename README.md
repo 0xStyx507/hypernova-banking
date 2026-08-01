@@ -4,9 +4,15 @@ Plataforma bancaria simplificada y demostrable con Go, chi, PostgreSQL, TigerBee
 
 ## Estado del proyecto
 
-Fase 1 en implementación: migraciones PostgreSQL, seed de usuarios, passwords hasheadas y autenticación con sesiones opacas.
+La base funcional incluye migraciones PostgreSQL, seed de usuarios, passwords
+hasheadas, sesiones opacas y operaciones financieras respaldadas por
+TigerBeetle.
 
 La fuente de verdad financiera será TigerBeetle. PostgreSQL se reservará para identidad, sesiones, auditoría y metadatos.
+
+El registro provisiona una cuenta HNL de checking. Los depósitos son una
+capacidad de demostración local controlada por `LEDGER_ALLOW_DEMO_DEPOSITS`;
+una integración real debe reemplazarla por un flujo autorizado de fondeo.
 
 El fixture de datos para la fase 1 es `datos-prueba-HNL.json` en la raíz. No se
 importa durante la fase 0; las reglas de hash, validación e idempotencia están
@@ -85,24 +91,39 @@ cd ..\mobile; npm install; npx tsc --noEmit
 docker compose config
 ```
 
-Endpoints de autenticación de fase 1:
+Endpoints de autenticación:
 
 - `POST /api/v1/auth/register`
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/refresh`
 - `POST /api/v1/auth/logout` con `Authorization: Bearer <access_token>`
 
+Endpoints financieros:
+
+- `POST /api/v1/accounts` y `GET /api/v1/accounts`
+- `GET /api/v1/accounts/{account_id}`
+- `GET /api/v1/accounts/{account_id}/balance`
+- `GET /api/v1/accounts/{account_id}/transactions`
+- `POST /api/v1/accounts/{account_id}/deposits`
+- `POST /api/v1/accounts/{account_id}/withdrawals`
+- `POST /api/v1/transfers`
+
+Las mutaciones financieras requieren `Authorization: Bearer <access_token>` e
+`Idempotency-Key`. Los importes se envían como cadenas de unidades menores;
+actualmente solo se admite HNL.
+
 El contrato OpenAPI versionado se encuentra en [`docs/openapi.yaml`](docs/openapi.yaml).
 
 El baseline de seguridad y riesgos está en
 [`docs/compliance/iso-27001-baseline.md`](docs/compliance/iso-27001-baseline.md).
 
-Las cuentas, balances, transferencias y operaciones financieras pertenecen a
-la fase 2 y no se almacenan en PostgreSQL como fuente de verdad.
+El modelo financiero y sus invariantes están documentados en
+[`docs/ledger.md`](docs/ledger.md). PostgreSQL no es la fuente de verdad de
+saldos.
 
 ## Decisiones
 
 - Monolito modular; no se agregan microservicios, colas, Redis, Kubernetes ni Terraform.
-- No se representa dinero en esta fase; las operaciones monetarias se implementarán con enteros de unidades menores en TigerBeetle.
+- Los importes se representan con enteros de unidades menores en TigerBeetle; no se usan números de punto flotante.
 - La imagen local de TigerBeetle se construye desde el binario oficial versionado para poder formatear el volumen automáticamente.
 - `docker compose` orquesta los servicios obligatorios; mobile se ejecuta con Expo fuera de Compose.

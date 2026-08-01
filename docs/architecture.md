@@ -1,8 +1,8 @@
 # Arquitectura inicial
 
 Este documento resume las decisiones de la plataforma y el estado comprobado
-del repositorio. La fase actual añade persistencia de identidad y autenticación;
-las operaciones financieras continúan fuera de alcance hasta fase 2.
+del repositorio. La plataforma combina identidad en PostgreSQL con un ledger
+financiero respaldado por TigerBeetle.
 
 ## Estado de Fase 0
 
@@ -14,7 +14,7 @@ las operaciones financieras continúan fuera de alcance hasta fase 2.
 | TigerBeetle | Implementado y validado | Servicio saludable y volumen de desarrollo inicializado |
 | Web React/Vite/TS/Tailwind | Implementado y validado | lint, build local y build Docker |
 | Mobile Expo | Implementado, pendiente de typecheck | `mobile/app` y `mobile/package.json` |
-| Health checks | Implementado y validado | `/healthz`, `/readyz` y healthchecks Compose |
+| Health checks | Implementado y validado | `/healthz`, `/readyz` verifica PostgreSQL y TigerBeetle, y healthchecks Compose |
 
 ## Límites de responsabilidad
 
@@ -35,14 +35,16 @@ web respondieron HTTP 200.
 
 - El typecheck de mobile todavía no se ha ejecutado porque sus dependencias
   locales no están instaladas.
-- TigerBeetle requiere memoria y `seccomp=unconfined` en Docker en algunos entornos; Compose deja esta configuración explícita.
+- El cliente nativo de TigerBeetle requiere `seccomp=unconfined` e `IPC_LOCK` en este entorno Docker local; ambos quedan explícitos en Compose y deben endurecerse antes de producción.
 - El binario de TigerBeetle está versionado por variable de entorno; el checksum se añadirá en la fase de hardening.
 
-## Estado de fase 1
+## Identidad y ledger
 
-La fase 1 usa una migración embebida, un comando de seed de usuarios y sesiones
-opacas con rotación de refresh tokens. Las cuentas y transacciones del fixture
-se validan y se difieren a fase 2 para su creación en TigerBeetle.
+La identidad usa una migración embebida, seed de usuarios y sesiones opacas con
+rotación de refresh tokens. Las cuentas HNL se provisionan en TigerBeetle y se
+relacionan con el usuario en PostgreSQL. Los movimientos utilizan claves de
+idempotencia, estados `unknown` para respuestas inciertas y el mismo
+identificador de transferencia cuando se reintentan.
 
 La superficie HTTP versionada de esta fase se mantiene en
 [`openapi.yaml`](openapi.yaml), que es el contrato compartido por API, web y
@@ -58,3 +60,5 @@ seleccionar silenciosamente una identidad ni dejar datos parciales. El comando
 también puede generar un reporte local de reconciliación con posiciones de
 registros y comparaciones booleanas, sin incluir emails, contraseñas, tokens ni
 números de cuenta.
+
+El detalle del modelo financiero está en [`ledger.md`](ledger.md).

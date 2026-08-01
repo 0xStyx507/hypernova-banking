@@ -1,4 +1,4 @@
-# Autenticación de fase 1
+# Autenticación e identidad
 
 ## Principios
 
@@ -15,7 +15,8 @@
 El contrato machine-readable de esta superficie está en
 [`docs/openapi.yaml`](openapi.yaml).
 
-`POST /api/v1/auth/register` recibe `email`, `password` y `full_name`.
+`POST /api/v1/auth/register` recibe `email`, `password` y `full_name`. Además
+de la identidad, provisiona la cuenta HNL de checking inicial.
 
 `POST /api/v1/auth/login` recibe `email` y `password` y devuelve el usuario,
 `access_token`, `refresh_token` y sus expiraciones.
@@ -30,5 +31,5 @@ revoca la sesión asociada.
 
 Las migraciones se aplican al arrancar la API y se registran en
 `schema_migrations`. El comando `scripts/seed-users.ps1` carga únicamente la
-colección `users` de `datos-prueba-HNL.json`; `accounts` y `transactions` se
-reservan para la fase 2.
+colección `users` de `datos-prueba-HNL.json`; las cuentas y transacciones
+financieras se gestionan mediante TigerBeetle.
