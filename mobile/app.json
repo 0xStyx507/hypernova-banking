@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "Hypernova Banking",
+    "slug": "hypernova-banking",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "hypernova",
+    "userInterfaceStyle": "automatic",
+    "plugins": ["expo-router", "expo-secure-store"],
+    "experiments": { "typedRoutes": true },
+    "ios": { "supportsTablet": true },
+    "android": { "adaptiveIcon": { "backgroundColor": "#10233f" } }
+  }
+}
+
