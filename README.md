@@ -91,6 +91,17 @@ cd ..\mobile; npm install; npx tsc --noEmit
 docker compose config
 ```
 
+El cliente móvil usa Expo SecureStore para mantener la sesión y consume el
+mismo contrato de autenticación, cuentas, saldos, historial y operaciones
+idempotentes. Para ejecutarlo:
+
+```powershell
+cd mobile
+npm install
+npm run typecheck
+npm run start
+```
+
 Endpoints de autenticación:
 
 - `POST /api/v1/auth/register`
