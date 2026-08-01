@@ -15,6 +15,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/hypernova-banking/api/internal/auth"
+	"github.com/hypernova-banking/api/internal/db"
 )
 
 // healthResponse is the stable public shape used by all phase-0 probes.
@@ -30,6 +34,7 @@ const (
 	versionedHealthPath = "/api/v1/health"
 	serviceName         = "hypernova-api"
 	healthcheckCommand  = "healthcheck"
+	startupTimeout      = 15 * time.Second
 )
 
 // main inicia la API HTTP o ejecuta el comando de healthcheck del contenedor.
@@ -45,7 +50,24 @@ func main() {
 		return
 	}
 
-	server := newHTTPServer(apiPort(os.Getenv("API_PORT")))
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancelStartup()
+	persistence, err := db.Open(startupCtx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		logger.Error("database initialization failed", "error", err)
+		os.Exit(1)
+	}
+	defer persistence.Close()
+	if err := db.Migrate(startupCtx, persistence); err != nil {
+		logger.Error("database migration failed", "error", err)
+		os.Exit(1)
+	}
+
+	authService := auth.NewService(persistence, auth.Config{
+		AccessTTL:  durationFromEnv("AUTH_ACCESS_TTL", 15*time.Minute),
+		RefreshTTL: durationFromEnv("AUTH_REFRESH_TTL", 7*24*time.Hour),
+	})
+	server := newHTTPServer(apiPort(os.Getenv("API_PORT")), newRouter(authService, persistence))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -82,10 +104,10 @@ func apiPort(configuredPort string) string {
 
 // newHTTPServer construye el servidor con timeouts explícitos en cada límite.
 // Esto evita que clientes lentos o incompletos retengan conexiones indefinidamente.
-func newHTTPServer(port string) *http.Server {
+func newHTTPServer(port string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              ":" + port,
-		Handler:           newRouter(),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -96,11 +118,20 @@ func newHTTPServer(port string) *http.Server {
 // newRouter define la superficie HTTP pequeña de fase 0. Readiness replica
 // liveness intencionalmente por ahora; los chequeos de dependencias se
 // agregarán junto con el módulo de base de datos en fase 1.
-func newRouter() http.Handler {
+type readinessChecker interface {
+	Ping(context.Context) error
+}
+
+// newRouter wires phase-1 identity routes while keeping health and readiness
+// separate: liveness confirms the process, readiness confirms PostgreSQL.
+func newRouter(authService *auth.Service, readiness readinessChecker) http.Handler {
 	router := chi.NewRouter()
 	router.Get(healthPath, healthHandler)
-	router.Get(readinessPath, healthHandler)
+	router.Get(readinessPath, readinessHandler(readiness))
 	router.Get(versionedHealthPath, healthHandler)
+	if authService != nil {
+		registerAuthRoutes(router, authService)
+	}
 	return router
 }
 
@@ -110,6 +141,31 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok", Service: serviceName})
 }
+
+func readinessHandler(readiness readinessChecker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if readiness == nil || readiness.Ping(r.Context()) != nil {
+			writeError(w, http.StatusServiceUnavailable, "service not ready")
+			return
+		}
+		healthHandler(w, r)
+	}
+}
+
+func durationFromEnv(name string, fallback time.Duration) time.Duration {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return fallback
+	}
+	return duration
+}
+
+// compile-time assertion keeps the readiness dependency explicit.
+var _ readinessChecker = (*pgxpool.Pool)(nil)
 
 // runHealthcheck verifica que el servidor acepte solicitudes desde dentro del
 // contenedor y está limitado intencionalmente por un timeout corto.

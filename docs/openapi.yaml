@@ -1,0 +1,295 @@
+openapi: 3.0.3
+info:
+  title: Hypernova Banking API
+  version: 1.0.0-phase-1
+  description: |
+    Contrato HTTP de la fase 1 de Hypernova Banking.
+
+    Esta fase cubre identidad, sesiones, auditoría y probes de salud. Las
+    cuentas, saldos y transferencias financieras quedan fuera del contrato
+    hasta que exista la integración validada con TigerBeetle.
+servers:
+  - url: http://localhost:8080
+    description: Desarrollo local
+tags:
+  - name: Health
+    description: Probes operativos de la API
+  - name: Authentication
+    description: Registro y gestión de sesiones
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Comprueba que el proceso está activo
+      tags: [Health]
+      responses:
+        '200':
+          description: Proceso disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Comprueba que PostgreSQL está disponible
+      tags: [Health]
+      responses:
+        '200':
+          description: Servicio listo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Dependencia no disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/health:
+    get:
+      operationId: getVersionedHealth
+      summary: Comprueba que el proceso está activo
+      tags: [Health]
+      responses:
+        '200':
+          description: Proceso disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/auth/register:
+    post:
+      operationId: registerUser
+      summary: Registra una identidad
+      description: El email se normaliza a minúsculas y debe ser único.
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Identidad creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: JSON inválido, campos desconocidos o datos fuera de las reglas de validación
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: El email ya está registrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/auth/login:
+    post:
+      operationId: loginUser
+      summary: Crea una sesión autenticada
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Credenciales válidas y sesión creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensResponse'
+        '400':
+          description: JSON inválido, campos desconocidos o cuerpo incompleto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Credenciales inválidas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/auth/refresh:
+    post:
+      operationId: refreshSession
+      summary: Rota una sesión usando su refresh token
+      description: El refresh token anterior queda inutilizable después de una rotación exitosa.
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Sesión rotada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensResponse'
+        '400':
+          description: JSON inválido, campos desconocidos o cuerpo incompleto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Refresh token inválido, expirado, revocado o reutilizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/auth/logout:
+    post:
+      operationId: logoutUser
+      summary: Revoca la sesión asociada al access token
+      description: La operación es idempotente; requiere el esquema Bearer y no revela si el token corresponde a una sesión activa.
+      tags: [Authentication]
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Sesión revocada o ya revocada
+        '401':
+          description: Falta un Bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+          example: hypernova-api
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Mensaje público y no sensible del error
+          example: invalid credentials
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password, full_name]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Email sin nombre visible; se recorta y normaliza a minúsculas.
+          example: person@example.com
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+          description: Entre 8 y 72 bytes antes de aplicar bcrypt.
+        full_name:
+          type: string
+          minLength: 2
+          maxLength: 120
+          description: Nombre visible, entre 2 y 120 caracteres Unicode.
+          example: Person Example
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: person@example.com
+        password:
+          type: string
+          format: password
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: Token opaco emitido por login o refresh.
+    User:
+      type: object
+      required: [id, email, full_name, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    TokensResponse:
+      type: object
+      required: [user, access_token, refresh_token, access_expires_at, refresh_expires_at]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        access_token:
+          type: string
+          description: Token opaco; nunca es un JWT.
+        refresh_token:
+          type: string
+          description: Token opaco de rotación; nunca es un JWT.
+        access_expires_at:
+          type: string
+          format: date-time
+        refresh_expires_at:
+          type: string
+          format: date-time

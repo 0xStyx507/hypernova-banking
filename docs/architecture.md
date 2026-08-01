@@ -1,8 +1,8 @@
 # Arquitectura inicial
 
 Este documento resume las decisiones de la plataforma y el estado comprobado
-del repositorio. La fase actual es una base ejecutable; la persistencia de
-identidad y la migración del fixture se implementarán en fase 1.
+del repositorio. La fase actual añade persistencia de identidad y autenticación;
+las operaciones financieras continúan fuera de alcance hasta fase 2.
 
 ## Estado de Fase 0
 
@@ -10,7 +10,7 @@ identidad y la migración del fixture se implementarán en fase 1.
 | --- | --- | --- |
 | Monorepo | Implementado y validado | Directorios `api`, `web`, `mobile`, `docker`, `scripts` |
 | API Go + chi | Implementado y validado | `go test ./...`, build Docker y healthcheck |
-| PostgreSQL | Implementado y validado | Servicio saludable en Compose; sin tablas todavía |
+| PostgreSQL | Implementado y validado | Migración inicial, usuarios, sesiones y auditoría |
 | TigerBeetle | Implementado y validado | Servicio saludable y volumen de desarrollo inicializado |
 | Web React/Vite/TS/Tailwind | Implementado y validado | lint, build local y build Docker |
 | Mobile Expo | Implementado, pendiente de typecheck | `mobile/app` y `mobile/package.json` |
@@ -38,8 +38,23 @@ web respondieron HTTP 200.
 - TigerBeetle requiere memoria y `seccomp=unconfined` en Docker en algunos entornos; Compose deja esta configuración explícita.
 - El binario de TigerBeetle está versionado por variable de entorno; el checksum se añadirá en la fase de hardening.
 
-## Fase 1 todavía no iniciada
+## Estado de fase 1
 
-No existen aún migraciones, tablas PostgreSQL, repositorios ni comando de seed.
-El contrato del fixture y las reglas de importación están documentados en
-[`phase-1-data-migration.md`](phase-1-data-migration.md).
+La fase 1 usa una migración embebida, un comando de seed de usuarios y sesiones
+opacas con rotación de refresh tokens. Las cuentas y transacciones del fixture
+se validan y se difieren a fase 2 para su creación en TigerBeetle.
+
+La superficie HTTP versionada de esta fase se mantiene en
+[`openapi.yaml`](openapi.yaml), que es el contrato compartido por API, web y
+mobile.
+
+El baseline de seguridad y riesgos se documenta en
+[`compliance/iso-27001-baseline.md`](compliance/iso-27001-baseline.md), con el
+alcance mínimo necesario para la prueba técnica.
+
+El seed está bloqueado actualmente por 20 registros con emails duplicados en
+`datos-prueba-HNL.json`. El comando falla antes de abrir la transacción para no
+seleccionar silenciosamente una identidad ni dejar datos parciales. El comando
+también puede generar un reporte local de reconciliación con posiciones de
+registros y comparaciones booleanas, sin incluir emails, contraseñas, tokens ni
+números de cuenta.

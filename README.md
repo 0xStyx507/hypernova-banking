@@ -4,7 +4,7 @@ Plataforma bancaria simplificada y demostrable con Go, chi, PostgreSQL, TigerBee
 
 ## Estado del proyecto
 
-Fase 0 implementada: monorepo base, API mínima, web mínima, mobile mínima, PostgreSQL, TigerBeetle, Docker Compose y health checks.
+Fase 1 en implementación: migraciones PostgreSQL, seed de usuarios, passwords hasheadas y autenticación con sesiones opacas.
 
 La fuente de verdad financiera será TigerBeetle. PostgreSQL se reservará para identidad, sesiones, auditoría y metadatos.
 
@@ -38,13 +38,33 @@ Copy-Item .env.example .env
 
 Los valores de `.env.example` son exclusivamente para desarrollo local. No registrar secretos reales.
 
-## Ejecutar Fase 0
+## Ejecutar la plataforma
 
 ```powershell
 docker compose build
 .\scripts\init-tigerbeetle.ps1
 docker compose up
 ```
+
+La API aplica las migraciones PostgreSQL al iniciar. Para cargar los usuarios
+del fixture de desarrollo, ejecuta:
+
+```powershell
+.\scripts\seed-users.ps1
+```
+
+El seed bloquea por defecto cualquier email duplicado. Para generar un reporte
+local de reconciliación sin conectarse a PostgreSQL:
+
+```powershell
+New-Item -ItemType Directory -Force data | Out-Null
+Push-Location api
+go run ./cmd/seed -file ..\datos-prueba-HNL.json -duplicates-report ..\data\duplicate-email-report.json -report-only
+Pop-Location
+```
+
+El reporte solo contiene posiciones de registros y comparaciones booleanas; no
+incluye emails, contraseñas, tokens ni números de cuenta.
 
 Endpoints disponibles:
 
@@ -65,7 +85,20 @@ cd ..\mobile; npm install; npx tsc --noEmit
 docker compose config
 ```
 
-En este punto la API solo expone health checks. Las migraciones, autenticación, cuentas y operaciones financieras pertenecen a las fases siguientes.
+Endpoints de autenticación de fase 1:
+
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/refresh`
+- `POST /api/v1/auth/logout` con `Authorization: Bearer <access_token>`
+
+El contrato OpenAPI versionado se encuentra en [`docs/openapi.yaml`](docs/openapi.yaml).
+
+El baseline de seguridad y riesgos está en
+[`docs/compliance/iso-27001-baseline.md`](docs/compliance/iso-27001-baseline.md).
+
+Las cuentas, balances, transferencias y operaciones financieras pertenecen a
+la fase 2 y no se almacenan en PostgreSQL como fuente de verdad.
 
 ## Decisiones
 

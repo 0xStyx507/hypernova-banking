@@ -1,0 +1,394 @@
+// Package auth implements identity, password verification and opaque sessions.
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"net/mail"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/hypernova-banking/api/internal/audit"
+)
+
+var (
+	// ErrInvalidInput is returned when a request fails domain validation.
+	ErrInvalidInput = errors.New("invalid input")
+	// ErrEmailInUse avoids exposing whether unrelated account data exists.
+	ErrEmailInUse = errors.New("email already in use")
+	// ErrInvalidCredentials is shared by missing users and wrong passwords.
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	// ErrInvalidRefreshToken is deliberately generic to avoid token probing.
+	ErrInvalidRefreshToken = errors.New("invalid refresh token")
+)
+
+const (
+	defaultAccessTTL  = 15 * time.Minute
+	defaultRefreshTTL = 7 * 24 * time.Hour
+	defaultBcryptCost = bcrypt.DefaultCost
+	maxPasswordBytes  = 72
+)
+
+// Config controls the lifetime and hashing cost of authentication artifacts.
+type Config struct {
+	AccessTTL  time.Duration
+	RefreshTTL time.Duration
+	BcryptCost int
+}
+
+// RequestMetadata contains non-secret request context for audit records.
+type RequestMetadata struct {
+	IPAddress string
+	UserAgent string
+}
+
+// RegisterInput contains the public fields accepted by registration.
+type RegisterInput struct {
+	Email    string
+	Password string
+	FullName string
+}
+
+// User is the safe user representation returned by the service.
+type User struct {
+	ID        uuid.UUID
+	Email     string
+	FullName  string
+	CreatedAt time.Time
+}
+
+// Tokens contains opaque credentials and their expiry timestamps.
+type Tokens struct {
+	User             User
+	AccessToken      string
+	RefreshToken     string
+	AccessExpiresAt  time.Time
+	RefreshExpiresAt time.Time
+}
+
+// Service coordinates identity and session operations in PostgreSQL.
+type Service struct {
+	pool       *pgxpool.Pool
+	accessTTL  time.Duration
+	refreshTTL time.Duration
+	bcryptCost int
+}
+
+// NewService creates an authentication service with safe defaults for omitted
+// configuration values.
+func NewService(pool *pgxpool.Pool, config Config) *Service {
+	if config.AccessTTL <= 0 {
+		config.AccessTTL = defaultAccessTTL
+	}
+	if config.RefreshTTL <= 0 {
+		config.RefreshTTL = defaultRefreshTTL
+	}
+	if config.BcryptCost < bcrypt.MinCost {
+		config.BcryptCost = defaultBcryptCost
+	}
+	return &Service{pool: pool, accessTTL: config.AccessTTL, refreshTTL: config.RefreshTTL, bcryptCost: config.BcryptCost}
+}
+
+// ValidateRegistration validates and normalizes user input without touching
+// the database. It is shared by the HTTP registration flow and the seed.
+func ValidateRegistration(input RegisterInput) (RegisterInput, error) {
+	input.Email = NormalizeEmail(input.Email)
+	input.FullName = strings.TrimSpace(input.FullName)
+	parsedEmail, err := mail.ParseAddress(input.Email)
+	if err != nil || parsedEmail.Address != input.Email || len(input.Email) > 320 {
+		return RegisterInput{}, ErrInvalidInput
+	}
+	if utf8.RuneCountInString(input.FullName) < 2 || utf8.RuneCountInString(input.FullName) > 120 {
+		return RegisterInput{}, ErrInvalidInput
+	}
+	if len([]byte(input.Password)) < 8 || len([]byte(input.Password)) > maxPasswordBytes {
+		return RegisterInput{}, ErrInvalidInput
+	}
+	return input, nil
+}
+
+// NormalizeEmail applies the canonical representation used by uniqueness and
+// login lookups.
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// ValidateLogin validates the minimum shape required before credential lookup.
+// It keeps malformed requests distinct from valid requests with bad secrets.
+func ValidateLogin(email, password string) (string, error) {
+	email = NormalizeEmail(email)
+	parsedEmail, err := mail.ParseAddress(email)
+	if err != nil || parsedEmail.Address != email || len(email) > 320 || strings.TrimSpace(password) == "" {
+		return "", ErrInvalidInput
+	}
+	return email, nil
+}
+
+// HashPassword returns a one-way bcrypt hash. The plaintext is never stored.
+func HashPassword(password string, cost int) (string, error) {
+	if cost < bcrypt.MinCost {
+		cost = defaultBcryptCost
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), cost)
+	if err != nil {
+		return "", fmt.Errorf("hash password: %w", err)
+	}
+	return string(hash), nil
+}
+
+// Register creates an identity and records the action atomically.
+func (s *Service) Register(ctx context.Context, input RegisterInput, metadata RequestMetadata) (User, error) {
+	if s == nil || s.pool == nil {
+		return User{}, fmt.Errorf("authentication service is not configured")
+	}
+	input, err := ValidateRegistration(input)
+	if err != nil {
+		return User{}, err
+	}
+	hash, err := HashPassword(input.Password, s.bcryptCost)
+	if err != nil {
+		return User{}, err
+	}
+
+	user := User{ID: uuid.New(), Email: input.Email, FullName: input.FullName, CreatedAt: time.Now().UTC()}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return User{}, fmt.Errorf("begin registration: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, full_name, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $5)
+	`, user.ID, user.Email, hash, user.FullName, user.CreatedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return User{}, ErrEmailInUse
+		}
+		return User{}, fmt.Errorf("insert user: %w", err)
+	}
+	if err := recordAudit(ctx, tx, &user.ID, "register", nil, metadata); err != nil {
+		return User{}, fmt.Errorf("audit registration: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, fmt.Errorf("commit registration: %w", err)
+	}
+	return user, nil
+}
+
+// Login verifies credentials and rotates a new session into existence.
+func (s *Service) Login(ctx context.Context, email, password string, metadata RequestMetadata) (Tokens, error) {
+	if s == nil || s.pool == nil {
+		return Tokens{}, fmt.Errorf("authentication service is not configured")
+	}
+	validatedEmail, err := ValidateLogin(email, password)
+	if err != nil {
+		return Tokens{}, err
+	}
+	email = validatedEmail
+	var user User
+	var passwordHash string
+	var active bool
+	err = s.pool.QueryRow(ctx, `
+		SELECT id, email, password_hash, full_name, created_at, active
+		FROM users WHERE LOWER(email) = $1
+	`, email).Scan(&user.ID, &user.Email, &passwordHash, &user.FullName, &user.CreatedAt, &active)
+	if err != nil || !active || bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)) != nil {
+		var userID *uuid.UUID
+		if err == nil {
+			userID = &user.ID
+		}
+		_ = recordAudit(ctx, s.pool, userID, "login_failure", nil, metadata)
+		return Tokens{}, ErrInvalidCredentials
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Tokens{}, fmt.Errorf("begin login: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	tokens, err := s.createSession(ctx, tx, user, metadata, "login")
+	if err != nil {
+		return Tokens{}, err
+	}
+	if _, err := tx.Exec(ctx, "UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1", user.ID); err != nil {
+		return Tokens{}, fmt.Errorf("update last login: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Tokens{}, fmt.Errorf("commit login: %w", err)
+	}
+	return tokens, nil
+}
+
+// Refresh rotates both opaque tokens while locking the session row. The old
+// refresh token becomes unusable as soon as this transaction commits.
+func (s *Service) Refresh(ctx context.Context, refreshToken string, metadata RequestMetadata) (Tokens, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(refreshToken) == "" {
+		return Tokens{}, ErrInvalidRefreshToken
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Tokens{}, fmt.Errorf("begin refresh: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var sessionID, userID uuid.UUID
+	var refreshExpiresAt time.Time
+	err = tx.QueryRow(ctx, `
+		SELECT id, user_id, refresh_expires_at
+		FROM sessions
+		WHERE refresh_token_hash = $1 AND revoked_at IS NULL
+		FOR UPDATE
+	`, tokenHash(refreshToken)).Scan(&sessionID, &userID, &refreshExpiresAt)
+	if err != nil || time.Now().UTC().After(refreshExpiresAt) {
+		return Tokens{}, ErrInvalidRefreshToken
+	}
+
+	user, err := findUser(ctx, tx, userID)
+	if err != nil {
+		return Tokens{}, ErrInvalidRefreshToken
+	}
+	accessToken, err := generateToken()
+	if err != nil {
+		return Tokens{}, err
+	}
+	newRefreshToken, err := generateToken()
+	if err != nil {
+		return Tokens{}, err
+	}
+	now := time.Now().UTC()
+	accessExpiresAt := now.Add(s.accessTTL)
+	newRefreshExpiresAt := now.Add(s.refreshTTL)
+	if _, err := tx.Exec(ctx, `
+		UPDATE sessions
+		SET access_token_hash = $1, refresh_token_hash = $2,
+		    access_expires_at = $3, refresh_expires_at = $4, last_used_at = $5
+		WHERE id = $6
+	`, tokenHash(accessToken), tokenHash(newRefreshToken), accessExpiresAt, newRefreshExpiresAt, now, sessionID); err != nil {
+		return Tokens{}, fmt.Errorf("rotate session: %w", err)
+	}
+	if err := recordAudit(ctx, tx, &userID, "refresh", map[string]any{"session_id": sessionID.String()}, metadata); err != nil {
+		return Tokens{}, fmt.Errorf("audit refresh: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Tokens{}, fmt.Errorf("commit refresh: %w", err)
+	}
+	return Tokens{User: user, AccessToken: accessToken, RefreshToken: newRefreshToken, AccessExpiresAt: accessExpiresAt, RefreshExpiresAt: newRefreshExpiresAt}, nil
+}
+
+// Logout revokes the session identified by an access token. Repeating logout
+// is intentionally idempotent and does not reveal token validity.
+func (s *Service) Logout(ctx context.Context, accessToken string, metadata RequestMetadata) error {
+	if s == nil || s.pool == nil || strings.TrimSpace(accessToken) == "" {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin logout: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var userID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		UPDATE sessions SET revoked_at = NOW(), last_used_at = NOW()
+		WHERE access_token_hash = $1 AND revoked_at IS NULL
+		RETURNING user_id
+	`, tokenHash(accessToken)).Scan(&userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	if err := recordAudit(ctx, tx, &userID, "logout", nil, metadata); err != nil {
+		return fmt.Errorf("audit logout: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit logout: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) createSession(ctx context.Context, executor audit.Executor, user User, metadata RequestMetadata, event string) (Tokens, error) {
+	accessToken, err := generateToken()
+	if err != nil {
+		return Tokens{}, err
+	}
+	refreshToken, err := generateToken()
+	if err != nil {
+		return Tokens{}, err
+	}
+	now := time.Now().UTC()
+	accessExpiresAt := now.Add(s.accessTTL)
+	refreshExpiresAt := now.Add(s.refreshTTL)
+	sessionID := uuid.New()
+	if _, err := executor.Exec(ctx, `
+		INSERT INTO sessions (id, user_id, access_token_hash, refresh_token_hash, access_expires_at, refresh_expires_at, ip_address, user_agent)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::inet, $8)
+	`, sessionID, user.ID, tokenHash(accessToken), tokenHash(refreshToken), accessExpiresAt, refreshExpiresAt, nullableIP(metadata.IPAddress), truncate(metadata.UserAgent, 512)); err != nil {
+		return Tokens{}, fmt.Errorf("insert session: %w", err)
+	}
+	if err := recordAudit(ctx, executor, &user.ID, event, map[string]any{"session_id": sessionID.String()}, metadata); err != nil {
+		return Tokens{}, fmt.Errorf("audit session: %w", err)
+	}
+	return Tokens{User: user, AccessToken: accessToken, RefreshToken: refreshToken, AccessExpiresAt: accessExpiresAt, RefreshExpiresAt: refreshExpiresAt}, nil
+}
+
+type queryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func findUser(ctx context.Context, queryer queryer, userID uuid.UUID) (User, error) {
+	var user User
+	err := queryer.QueryRow(ctx, `SELECT id, email, full_name, created_at FROM users WHERE id = $1 AND active`, userID).Scan(&user.ID, &user.Email, &user.FullName, &user.CreatedAt)
+	return user, err
+}
+
+func recordAudit(ctx context.Context, executor audit.Executor, userID *uuid.UUID, event string, details map[string]any, metadata RequestMetadata) error {
+	return audit.Record(ctx, executor, userID, event, details, metadata.IPAddress, metadata.UserAgent)
+}
+
+func generateToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+func tokenHash(token string) []byte {
+	hash := sha256.Sum256([]byte(token))
+	return hash[:]
+}
+
+func nullableIP(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func truncate(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
