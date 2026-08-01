@@ -17,8 +17,8 @@ import (
 	"github.com/hypernova-banking/api/internal/auth"
 )
 
-// fixture contains the complete input shape while phase 1 intentionally
-// persists only users. Accounts and transactions belong to phase 2/TigerBeetle.
+// fixture contains the complete input shape; this command persists identities
+// while accounts and transactions are created through the financial API.
 type fixture struct {
 	Users        []userRecord        `json:"users"`
 	Accounts     []accountRecord     `json:"accounts"`

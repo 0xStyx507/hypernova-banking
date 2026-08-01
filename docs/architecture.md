@@ -1,66 +1,56 @@
-# Arquitectura inicial
+# Arquitectura
 
-Este documento resume las decisiones de la plataforma y el estado comprobado
-del repositorio. La plataforma combina identidad en PostgreSQL con un ledger
-financiero respaldado por TigerBeetle.
+Hypernova Banking es un monolito modular que combina identidad en PostgreSQL,
+contabilidad financiera en TigerBeetle y clientes web/mobile que consumen un
+contrato HTTP común.
 
-## Estado de Fase 0
+## Responsabilidades
 
-| Área | Estado | Evidencia |
-| --- | --- | --- |
-| Monorepo | Implementado y validado | Directorios `api`, `web`, `mobile`, `docker`, `scripts` |
-| API Go + chi | Implementado y validado | `go test ./...`, build Docker y healthcheck |
-| PostgreSQL | Implementado y validado | Migración inicial, usuarios, sesiones y auditoría |
-| TigerBeetle | Implementado y validado | Servicio saludable y volumen de desarrollo inicializado |
-| Web React/Vite/TS/Tailwind | Implementado y validado | lint, build local y build Docker |
-| Mobile Expo | Implementado, pendiente de typecheck | `mobile/app` y `mobile/package.json` |
-| Health checks | Implementado y validado | `/healthz`, `/readyz` verifica PostgreSQL y TigerBeetle, y healthchecks Compose |
+- PostgreSQL: usuarios, sesiones, auditoría, propiedad de cuentas, operaciones
+  idempotentes y acciones MCP preparadas.
+- TigerBeetle: cuentas, transferencias y balances; es la única fuente de verdad
+  financiera.
+- API Go + chi: validación, autorización, casos de uso, migraciones y contrato
+  HTTP.
+- Web React/Vite y mobile Expo: presentación y consumo del contrato; no
+  deciden reglas financieras.
+- MCP y asistente: herramientas autenticadas, proveedor local desacoplado y
+  frontera persistida `prepare/confirm/cancel`.
 
-## Límites de responsabilidad
+## Flujo financiero
 
-- PostgreSQL: usuarios, autenticación, sesiones, auditoría y metadatos.
-- TigerBeetle: cuentas, transferencias y balances; será la única fuente de verdad financiera.
-- API: validación, autorización, casos de uso y contratos HTTP.
-- Web y mobile: presentación y consumo de contratos; nunca deciden reglas financieras.
-- IA/MCP: usa herramientas autenticadas y una frontera persistida
-  `prepare/confirm/cancel`; ninguna acción financiera se ejecuta desde texto
-  libre sin confirmación explícita.
+Los importes públicos son cadenas de unidades menores enteras y solo HNL está
+habilitado. Toda mutación usa `Idempotency-Key`; el API conserva el mismo ID de
+transferencia para reconciliar respuestas inciertas. El cliente no realiza
+pre-chequeos de saldo que puedan introducir una carrera: TigerBeetle aplica la
+restricción de fondos.
 
-## Validación de fase 0
+Las acciones solicitadas por MCP se validan, se guardan con un hash de
+integridad y expiran. Solo una confirmación exacta puede ejecutar una acción;
+la cancelación no puede competir con una acción ya reclamada.
 
-La ejecución local validada produjo cuatro contenedores saludables: API,
-PostgreSQL, TigerBeetle y web. La configuración de Compose también fue
-validada con `docker compose config`. Los endpoints `/healthz`, `/readyz` y la
-web respondieron HTTP 200.
+## Disponibilidad y operación
 
-## Riesgos y pendientes de fase 0
+Compose coordina PostgreSQL, TigerBeetle, API y web. `/healthz` confirma el
+proceso y `/readyz` confirma las dependencias críticas. El API define timeouts,
+rate limiting local, logs estructurados y migraciones embebidas transaccionales.
 
-- El typecheck de mobile todavía no se ha ejecutado porque sus dependencias
-  locales no están instaladas.
-- El cliente nativo de TigerBeetle requiere `seccomp=unconfined` e `IPC_LOCK` en este entorno Docker local; ambos quedan explícitos en Compose y deben endurecerse antes de producción.
-- El binario de TigerBeetle está versionado por variable de entorno; el checksum se añadirá en la fase de hardening.
+El cliente nativo de TigerBeetle requiere `seccomp=unconfined` e `IPC_LOCK` en
+este entorno Docker local. Una instalación productiva debe revisar ambos
+requisitos, aislar la red, terminar TLS en infraestructura y usar un flujo de
+fondeo autorizado.
 
-## Identidad y ledger
+## Contratos y seguridad
 
-La identidad usa una migración embebida, seed de usuarios y sesiones opacas con
-rotación de refresh tokens. Las cuentas HNL se provisionan en TigerBeetle y se
-relacionan con el usuario en PostgreSQL. Los movimientos utilizan claves de
-idempotencia, estados `unknown` para respuestas inciertas y el mismo
-identificador de transferencia cuando se reintentan.
+La superficie pública se mantiene en [`openapi.yaml`](openapi.yaml), que es
+compartida por API, web, mobile y clientes MCP. El baseline mínimo de
+seguridad se encuentra en
+[`compliance/iso-27001-baseline.md`](compliance/iso-27001-baseline.md).
 
-La superficie HTTP versionada de esta fase se mantiene en
-[`openapi.yaml`](openapi.yaml), que es el contrato compartido por API, web y
-mobile y clientes MCP.
+El seed rechaza emails duplicados antes de abrir la transacción y nunca
+selecciona silenciosamente una identidad. Los reportes locales contienen solo
+posiciones y comparaciones booleanas, nunca credenciales, tokens o números de
+cuenta.
 
-El baseline de seguridad y riesgos se documenta en
-[`compliance/iso-27001-baseline.md`](compliance/iso-27001-baseline.md), con el
-alcance mínimo necesario para la prueba técnica.
-
-El seed está bloqueado actualmente por 20 registros con emails duplicados en
-`datos-prueba-HNL.json`. El comando falla antes de abrir la transacción para no
-seleccionar silenciosamente una identidad ni dejar datos parciales. El comando
-también puede generar un reporte local de reconciliación con posiciones de
-registros y comparaciones booleanas, sin incluir emails, contraseñas, tokens ni
-números de cuenta.
-
-El detalle del modelo financiero está en [`ledger.md`](ledger.md).
+El detalle del ledger está en [`ledger.md`](ledger.md) y el modelo de sesiones
+en [`authentication.md`](authentication.md).

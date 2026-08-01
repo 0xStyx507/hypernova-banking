@@ -14,9 +14,9 @@ El registro provisiona una cuenta HNL de checking. Los depósitos son una
 capacidad de demostración local controlada por `LEDGER_ALLOW_DEMO_DEPOSITS`;
 una integración real debe reemplazarla por un flujo autorizado de fondeo.
 
-El fixture de datos para la fase 1 es `datos-prueba-HNL.json` en la raíz. No se
-importa durante la fase 0; las reglas de hash, validación e idempotencia están
-documentadas en `docs/phase-1-data-migration.md`.
+Los datos de prueba y artefactos de evaluación se mantienen fuera del control
+de versiones. El seed valida duplicados antes de persistir identidades y no
+incluye credenciales en reportes.
 
 ## Estructura
 
@@ -133,7 +133,7 @@ El chat autenticado (`POST /api/v1/chat/messages`) usa un proveedor local
 determinista y un cliente MCP HTTP. Puede consultar saldo mediante herramientas
 de solo lectura; nunca ejecuta una mutación directamente desde el mensaje.
 
-El contrato OpenAPI versionado se encuentra en [`docs/openapi.yaml`](docs/openapi.yaml).
+El contrato OpenAPI se encuentra en [`docs/openapi.yaml`](docs/openapi.yaml).
 
 El API aplica un límite local configurable con `API_RATE_LIMIT_PER_MINUTE` y
 la web permite descargar el historial reciente en CSV.
@@ -149,5 +149,5 @@ saldos.
 
 - Monolito modular; no se agregan microservicios, colas, Redis, Kubernetes ni Terraform.
 - Los importes se representan con enteros de unidades menores en TigerBeetle; no se usan números de punto flotante.
-- La imagen local de TigerBeetle se construye desde el binario oficial versionado para poder formatear el volumen automáticamente.
+- La imagen local de TigerBeetle se construye desde un binario oficial fijado para poder formatear el volumen automáticamente.
 - `docker compose` orquesta los servicios obligatorios; mobile se ejecuta con Expo fuera de Compose.

@@ -1,5 +1,4 @@
-// Package main exposes the small phase-0 HTTP surface and the container
-// healthcheck command for the Hypernova API.
+// Package main exposes the Hypernova HTTP API and the container healthcheck.
 package main
 
 import (
@@ -28,7 +27,7 @@ import (
 	"github.com/hypernova-banking/api/internal/mcp"
 )
 
-// healthResponse is the stable public shape used by all phase-0 probes.
+// healthResponse is the stable public shape used by process probes.
 type healthResponse struct {
 	Status  string `json:"status"`
 	Service string `json:"service"`
@@ -164,15 +163,14 @@ func newHTTPServer(port string, handler http.Handler) *http.Server {
 	}
 }
 
-// newRouter define la superficie HTTP pequeña de fase 0. Readiness replica
-// liveness intencionalmente por ahora; los chequeos de dependencias se
-// agregarán junto con el módulo de base de datos en fase 1.
+// newRouter keeps the small health surface available to tests while the
+// production constructor adds ledger, MCP and assistant dependencies.
 type readinessChecker interface {
 	Ping(context.Context) error
 }
 
-// newRouter wires phase-1 identity routes while keeping health and readiness
-// separate: liveness confirms the process, readiness confirms PostgreSQL.
+// newRouterWithServices wires identity, ledger, MCP and assistant routes while
+// keeping health and readiness separate.
 func newRouter(authService *auth.Service, readiness readinessChecker, ledgerService *ledger.Service, mcpServices ...*mcp.Service) http.Handler {
 	var mcpService *mcp.Service
 	if len(mcpServices) > 0 {

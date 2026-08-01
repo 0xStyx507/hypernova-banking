@@ -33,23 +33,25 @@ de la organización.
 | R-005 | Auditoría puede revelar información sensible. | Alto | Eventos con metadatos mínimos y exclusión explícita de credenciales. | `api/internal/audit` |
 | R-006 | Un error de integración podría alterar el saldo financiero. | Crítico | PostgreSQL no almacena la verdad financiera; TigerBeetle será el ledger único. | `docs/architecture.md` |
 
-## Controles aplicados en fase 1
+## Controles aplicados
 
 - Validación de entrada y rechazo de campos JSON desconocidos.
-- Contrato OpenAPI versionado para la superficie HTTP.
+- Contrato OpenAPI para la superficie HTTP.
 - Contraseñas con bcrypt y límite compatible con el algoritmo.
 - Access y refresh tokens aleatorios, opacos y almacenados solo como hashes.
 - Rotación transaccional de refresh tokens y revocación idempotente.
 - Auditoría de registro, login, fallos de login, refresh, logout y seed.
 - Restricción de email único en PostgreSQL y preflight del fixture.
 - Migraciones embebidas, ordenadas y registradas.
-- Pruebas unitarias, `go vet`, smoke tests HTTP y validación de Compose.
+- Pruebas unitarias, `go vet`, smoke tests HTTP, validación de Compose y CI.
 
-## Controles pendientes
+## Riesgos residuales y mejoras
 
-Estos controles no se deben fingir como implementados y se planifican por fase:
+Estos controles requieren una decisión operativa, infraestructura adicional o
+un alcance regulatorio específico:
 
-- MFA, recuperación de cuenta y políticas de bloqueo/rate limiting.
+- MFA, recuperación de cuenta y bloqueo adaptativo; existe un rate limit local
+  configurable, pero una instalación distribuida debe moverlo al gateway.
 - Gestión externa de secretos y rotación de claves.
 - TLS terminado en infraestructura, cabeceras de seguridad y gestión de CORS.
 - Roles administrativos, mínimo privilegio y separación de funciones.

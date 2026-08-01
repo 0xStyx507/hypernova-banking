@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Hypernova Banking API
-  version: 1.0.0-phase-4
+  version: 1.0.0
   license:
     name: Proprietary technical assessment implementation
     url: https://github.com/0xStyx507/hypernova-banking
