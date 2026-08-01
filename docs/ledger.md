@@ -48,6 +48,6 @@ unknown reservation can be reconciled with the original identifier.
 ## Operational limitations
 
 The first ledger release supports HNL checking accounts and recent history
-with a maximum page size of 100. History accepts a timestamp cursor, while
-rate limiting and broader reconciliation tooling remain separate operational
-work.
+with a maximum page size of 100. History accepts a timestamp cursor and can be
+exported as a bounded CSV. The API has a local per-IP rate limit; a distributed
+deployment should move that control to a shared edge or gateway.

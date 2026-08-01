@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"net/http"
 	"strconv"
@@ -50,6 +51,7 @@ func registerLedgerRoutes(router chi.Router, authService *auth.Service, service 
 		router.Get("/accounts/{account_id}", handler.getAccount)
 		router.Get("/accounts/{account_id}/balance", handler.getBalance)
 		router.Get("/accounts/{account_id}/transactions", handler.getHistory)
+		router.Get("/accounts/{account_id}/transactions.csv", handler.exportHistory)
 		router.Post("/accounts/{account_id}/deposits", handler.deposit)
 		router.Post("/accounts/{account_id}/withdrawals", handler.withdraw)
 		router.Post("/transfers", handler.transfer)
@@ -146,6 +148,29 @@ func (h ledgerHandler) getHistory(w http.ResponseWriter, r *http.Request) {
 		nextCursor = strconv.FormatInt(items[len(items)-1].CreatedAt.UnixNano(), 10)
 	}
 	writeJSON(w, http.StatusOK, historyResponse{Items: items, HasMore: nextCursor != "", NextCursor: nextCursor})
+}
+
+// exportHistory writes a bounded, ownership-checked CSV snapshot. It uses the
+// same TigerBeetle-backed history query as JSON, so the export cannot invent a
+// balance or expose another user's account.
+func (h ledgerHandler) exportHistory(w http.ResponseWriter, r *http.Request) {
+	items, err := h.service.History(r.Context(), authenticatedUser(r), chi.URLParam(r, "account_id"), 100, "")
+	if err != nil {
+		writeLedgerError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="hypernova-transactions.csv"`)
+	writer := csv.NewWriter(w)
+	if err := writer.Write([]string{"transfer_id", "type", "direction", "amount", "currency", "created_at"}); err != nil {
+		return
+	}
+	for _, item := range items {
+		if err := writer.Write([]string{item.TransferID, item.Type, item.Direction, item.Amount, item.Currency, item.CreatedAt.Format(time.RFC3339Nano)}); err != nil {
+			return
+		}
+	}
+	writer.Flush()
 }
 
 func (h ledgerHandler) deposit(w http.ResponseWriter, r *http.Request) {

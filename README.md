@@ -104,6 +104,7 @@ Endpoints financieros:
 - `GET /api/v1/accounts/{account_id}`
 - `GET /api/v1/accounts/{account_id}/balance`
 - `GET /api/v1/accounts/{account_id}/transactions`
+- `GET /api/v1/accounts/{account_id}/transactions.csv` (máximo 100 movimientos)
 - `POST /api/v1/accounts/{account_id}/deposits`
 - `POST /api/v1/accounts/{account_id}/withdrawals`
 - `POST /api/v1/transfers`
@@ -122,6 +123,9 @@ determinista y un cliente MCP HTTP. Puede consultar saldo mediante herramientas
 de solo lectura; nunca ejecuta una mutación directamente desde el mensaje.
 
 El contrato OpenAPI versionado se encuentra en [`docs/openapi.yaml`](docs/openapi.yaml).
+
+El API aplica un límite local configurable con `API_RATE_LIMIT_PER_MINUTE` y
+la web permite descargar el historial reciente en CSV.
 
 El baseline de seguridad y riesgos está en
 [`docs/compliance/iso-27001-baseline.md`](docs/compliance/iso-27001-baseline.md).

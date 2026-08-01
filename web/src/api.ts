@@ -261,6 +261,28 @@ export class ApiClient {
     return request<HistoryResponse>(path, {}, options);
   }
 
+  /** Downloads the bounded, ownership-checked CSV history export. */
+  async exportHistory(accountId: string, options: AuthenticatedRequestOptions): Promise<Blob> {
+    const response = await fetch(joinApiPath(`/v1/accounts/${encodeURIComponent(accountId)}/transactions.csv`), {
+      headers: {
+        Accept: "text/csv",
+        Authorization: `Bearer ${options.accessToken}`,
+      },
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      signal: options.signal,
+    });
+    if (response.ok) return response.blob();
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = undefined;
+    }
+    throw new ApiError(response.status, isErrorResponse(payload) ? payload : { error: response.statusText || "Request failed", code: "http_error" });
+  }
+
   deposit(
     accountId: string,
     input: MovementRequest,

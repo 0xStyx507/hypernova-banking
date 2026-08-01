@@ -183,6 +183,7 @@ func newRouter(authService *auth.Service, readiness readinessChecker, ledgerServ
 
 func newRouterWithServices(authService *auth.Service, readiness readinessChecker, ledgerService *ledger.Service, mcpService *mcp.Service, assistantService *assistant.Service) http.Handler {
 	router := chi.NewRouter()
+	router.Use(newRateLimiter(rateLimitFromEnv()).middleware)
 	router.Get(healthPath, healthHandler)
 	router.Get(readinessPath, readinessHandler(readiness))
 	router.Get(versionedHealthPath, healthHandler)

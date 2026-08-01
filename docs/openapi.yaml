@@ -313,6 +313,27 @@ paths:
         '400':
           description: Límite inválido
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/accounts/{account_id}/transactions.csv:
+    get:
+      operationId: exportAccountTransactionsCsv
+      summary: Exporta el historial reciente en CSV
+      description: Exporta como máximo 100 movimientos después de comprobar la propiedad de la cuenta.
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      responses:
+        '200':
+          description: Archivo CSV de movimientos
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /api/v1/accounts/{account_id}/deposits:
     post:
       operationId: createDeposit

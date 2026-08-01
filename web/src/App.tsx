@@ -94,6 +94,7 @@ function App() {
   const [destinationAccountId, setDestinationAccountId] = useState("");
   const [operationBusy, setOperationBusy] = useState(false);
   const [operationNotice, setOperationNotice] = useState<FormNotice | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
 
   const activeAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId) ?? accounts[0],
@@ -209,6 +210,24 @@ function App() {
     }
   }
 
+  async function handleExport() {
+    if (!session || !activeAccount) return;
+    setExportBusy(true);
+    try {
+      const blob = await apiClient.exportHistory(activeAccount.id, { accessToken: session.accessToken });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "hypernova-transactions.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setDashboardError(displayError(error));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
   if (!session) {
     return (
       <main className="min-h-screen px-5 py-8 text-ink sm:px-10 sm:py-12">
@@ -267,7 +286,8 @@ function App() {
 
             <section className="surface p-5 sm:p-7"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Cuenta</p><h2 className="mt-2 text-xl font-semibold">Tu cuenta de uso diario</h2></div>{accounts.length > 0 && <select aria-label="Seleccionar cuenta" className="sm:max-w-xs" value={activeAccount?.id ?? ""} onChange={(event) => setSelectedAccountId(event.target.value)}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.type} · {account.currency} · {account.status}</option>)}</select>}</div></section>
 
-            <section className="surface p-5 sm:p-7"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Actividad</p><h2 className="mt-2 text-xl font-semibold">Historial reciente</h2></div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">Unidades menores</span></div>{!history && dashboardLoading ? <div className="mt-6 space-y-3"><div className="skeleton h-12 w-full" /><div className="skeleton h-12 w-full" /></div> : history?.items.length ? <div className="mt-5 divide-y divide-slate-100">{history.items.map((transaction) => <TransactionRow key={`${transaction.transfer_id}-${transaction.created_at}`} transaction={transaction} />)}</div> : <div className="mt-6 rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500">Todavía no hay movimientos en esta cuenta.</div>}{history?.has_more && <button className="secondary-button mt-5 w-full" onClick={loadMoreHistory} type="button">Cargar movimientos anteriores</button>}</section>
+            <section className="surface p-5 sm:p-7"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Actividad</p><h2 className="mt-2 text-xl font-semibold">Historial reciente</h2></div><div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">Unidades menores</span><button className="secondary-button" disabled={exportBusy || !activeAccount} onClick={handleExport} type="button">{exportBusy ? "Exportando…" : "CSV"}</button></div></div>{!history && dashboardLoading ? <div className="mt-6 space-y-3"><div className="skeleton h-12 w-full" /><div className="skeleton h-12 w-full" /></div> : history?.items.length ? <div className="mt-5 divide-y divide-slate-100">{history.items.map((transaction) => <TransactionRow key={`${transaction.transfer_id}-${transaction.created_at}`} transaction={transaction} />)}</div> : <div className="mt-6 rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500">Todavía no hay movimientos en esta cuenta.</div>}{history?.has_more && <button className="secondary-button mt-5 w-full" onClick={loadMoreHistory} type="button">Cargar movimientos anteriores</button>}</section>
+            <ActivityChart transactions={history?.items ?? []} />
           </section>
 
           <section className="surface h-fit p-5 sm:p-7"><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Operar</p><h2 className="mt-2 text-xl font-semibold">Mueve tus fondos</h2><div className="mt-5 grid grid-cols-3 rounded-full bg-slate-100 p-1">{(["deposit", "withdraw", "transfer"] as OperationMode[]).map((mode) => <button key={mode} className={`rounded-full px-2 py-2 text-xs font-bold ${operationMode === mode ? "bg-ink text-white" : "text-slate-500"}`} onClick={() => { setOperationMode(mode); setOperationNotice(null); }} type="button">{mode === "deposit" ? "Depositar" : mode === "withdraw" ? "Retirar" : "Transferir"}</button>)}</div><form className="mt-6 space-y-5" onSubmit={handleOperation}><label><span className="field-label">Importe HNL (unidades menores)</span><input required inputMode="numeric" pattern="[1-9][0-9]*" value={operationAmount} onChange={(event) => setOperationAmount(event.target.value.replace(/\D/g, ""))} placeholder="100000" /></label>{operationMode === "transfer" && <label><span className="field-label">Cuenta destino</span><input required value={destinationAccountId} onChange={(event) => setDestinationAccountId(event.target.value)} placeholder="UUID de la cuenta" /></label>}<div className="rounded-2xl bg-slate-50 p-4 text-xs leading-5 text-slate-500">{operationMode === "deposit" ? "El depósito de demostración está protegido por configuración del entorno." : operationMode === "withdraw" ? "TigerBeetle rechaza débitos que superen los créditos disponibles." : "La cuenta origen siempre es la cuenta seleccionada."}</div>{operationNotice && <p className={`status-message ${operationNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{operationNotice.message}</p>}<button className="primary-button w-full" disabled={operationBusy || !activeAccount} type="submit">{operationBusy ? "Enviando…" : "Confirmar operación"}</button></form></section>
@@ -276,6 +296,21 @@ function App() {
       </div>
     </main>
   );
+}
+
+function ActivityChart({ transactions }: { transactions: Transaction[] }) {
+  const points = transactions.slice(0, 6).reverse();
+  if (points.length === 0) return null;
+  const maximum = points.reduce((current, transaction) => {
+    try {
+      const amount = BigInt(transaction.amount);
+      return amount > current ? amount : current;
+    } catch {
+      return current;
+    }
+  }, 0n);
+
+  return <section className="surface p-5 sm:p-7"><div className="flex items-center justify-between"><div><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Tendencia</p><h2 className="mt-2 text-xl font-semibold">Últimos movimientos</h2></div><span className="text-xs text-slate-500">HNL</span></div><div className="mt-6 flex h-28 items-end justify-between gap-3" aria-label="Gráfico de importes recientes" role="img">{points.map((transaction) => { let amount = 0n; try { amount = BigInt(transaction.amount); } catch { /* Ignore malformed display data. */ } const percentage = maximum > 0n ? Number((amount * 100n) / maximum) : 0; return <div className="flex h-full flex-1 flex-col items-center justify-end gap-2" key={`${transaction.transfer_id}-chart`}><div className={`w-full max-w-10 rounded-t-xl ${transaction.direction === "credit" ? "bg-emerald-300" : "bg-ink"}`} style={{ height: `${Math.max(12, percentage)}%` }} title={formatMinorAmount(transaction.amount)} /><span className="text-[10px] font-bold uppercase text-slate-400">{transaction.direction === "credit" ? "C" : "D"}</span></div>; })}</div></section>;
 }
 
 function TransactionRow({ transaction }: { transaction: Transaction }) {
