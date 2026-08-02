@@ -144,6 +144,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: MFA configurado pero no disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Error interno
           content:
@@ -210,6 +216,164 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/auth/oauth/{provider}/start:
+    get:
+      operationId: startOAuth
+      summary: Inicia autenticación con Google o GitHub
+      description: Genera un state de un solo uso y redirige al proveedor configurado. No emite tokens en esta respuesta.
+      tags: [Authentication]
+      parameters:
+        - $ref: '#/components/parameters/OAuthProvider'
+        - name: return_to
+          in: query
+          required: false
+          description: URI exacta previamente permitida en OAUTH_ALLOWED_REDIRECT_URIS.
+          schema: { type: string }
+      responses:
+        '302':
+          description: Redirección al proveedor OAuth
+        '400':
+          description: Proveedor no soportado
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '503':
+          description: El proveedor no tiene configuración completa
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '500':
+          description: Error interno al preparar el flujo
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/auth/oauth/{provider}/callback:
+    get:
+      operationId: completeOAuthCallback
+      summary: Completa el callback del proveedor OAuth
+      description: Valida y consume el state, verifica el perfil externo y devuelve un código efímero para el endpoint de exchange.
+      tags: [Authentication]
+      parameters:
+        - $ref: '#/components/parameters/OAuthProvider'
+        - name: code
+          in: query
+          required: false
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+        - name: error
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Código efímero listo para intercambio (JSON si no se solicitó return_to)
+          content: { application/json: { schema: { $ref: '#/components/schemas/OAuthCallbackResponse' } } }
+        '400':
+          description: State inválido o expirado
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Autorización denegada o identidad no verificada
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: El email ya pertenece a otra identidad local
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '502':
+          description: El proveedor no respondió correctamente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '503':
+          description: El proveedor no está configurado o el ledger no está disponible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '500':
+          description: Error interno de autenticación
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/auth/oauth/{provider}/exchange:
+    post:
+      operationId: exchangeOAuthCode
+      summary: Intercambia un código OAuth efímero por una sesión
+      description: El código se consume una sola vez al crear la sesión. Si MFA está activo, se debe enviar el código TOTP.
+      tags: [Authentication]
+      parameters:
+        - $ref: '#/components/parameters/OAuthProvider'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthExchangeRequest'
+      responses:
+        '200':
+          description: Sesión creada
+          content: { application/json: { schema: { $ref: '#/components/schemas/TokensResponse' } } }
+        '400':
+          description: Solicitud o proveedor inválido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Código expirado, inválido o MFA incorrecto/requerido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '500':
+          description: Error interno de autenticación
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/auth/mfa:
+    get:
+      operationId: getMFAStatus
+      summary: Consulta el estado del MFA del usuario autenticado
+      tags: [Authentication]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Estado del factor TOTP
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MFAStatus'
+        '401':
+          description: Sesión inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/auth/mfa/enroll:
+    post:
+      operationId: enrollMFA
+      summary: Genera un enrolamiento TOTP de un solo uso
+      description: Devuelve una URI otpauth estándar para crear un QR compatible con Google Authenticator y Microsoft Authenticator. El secreto solo se devuelve en esta respuesta.
+      tags: [Authentication]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '201':
+          description: Enrolamiento creado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MFAEnrollment'
+        '401':
+          description: Sesión inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '503':
+          description: MFA no disponible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/auth/mfa/verify:
+    post:
+      operationId: verifyMFA
+      summary: Activa el MFA tras validar un código TOTP
+      tags: [Authentication]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MFACodeRequest'
+      responses:
+        '200':
+          description: MFA activado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MFAStatus'
+        '401':
+          description: Código inválido o sesión inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: Enrolamiento ausente o MFA ya activo
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '410':
+          description: Enrolamiento expirado
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /api/v1/accounts:
     post:
       operationId: createAccount
@@ -304,14 +468,20 @@ paths:
           schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
         - name: cursor
           in: query
-          description: Cursor numérico opaco devuelto por la página anterior
+          description: Cursor opaco devuelto por la página anterior; no debe interpretarse ni modificarse
           schema: { type: string }
       responses:
         '200':
           description: Transferencias más recientes primero
           content: { application/json: { schema: { $ref: '#/components/schemas/HistoryResponse' } } }
         '400':
-          description: Límite inválido
+          description: Límite o cursor inválido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '403':
+          description: MFA no completado o cuenta ajena
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /api/v1/accounts/{account_id}/transactions.csv:
     get:
@@ -528,6 +698,14 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque
+  parameters:
+    OAuthProvider:
+      name: provider
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [google, github]
   schemas:
     HealthResponse:
       type: object
@@ -567,7 +745,7 @@ components:
           format: password
           minLength: 8
           maxLength: 72
-          description: Entre 8 y 72 bytes antes de aplicar bcrypt.
+          description: Entre 8 y 72 bytes antes de aplicar bcrypt. Se recomienda combinar letras, números y símbolos.
         full_name:
           type: string
           minLength: 2
@@ -586,6 +764,62 @@ components:
         password:
           type: string
           format: password
+        mfa_code:
+          type: string
+          pattern: '^[0-9]{6}$'
+          description: Código TOTP de seis dígitos requerido cuando MFA está activo.
+    OAuthExchangeRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: Código efímero entregado por el callback OAuth; se consume una sola vez.
+        mfa_code:
+          type: string
+          pattern: '^[0-9]{6}$'
+          description: Código TOTP requerido cuando la cuenta tiene MFA activo.
+    OAuthCallbackResponse:
+      type: object
+      required: [user, exchange_code, expires_at]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        exchange_code:
+          type: string
+          description: Código efímero, no reutilizable, para crear la sesión.
+        expires_at:
+          type: string
+          format: date-time
+        account:
+          $ref: '#/components/schemas/Account'
+    MFACodeRequest:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          pattern: '^[0-9]{6}$'
+    MFAStatus:
+      type: object
+      required: [enabled, enrolled]
+      properties:
+        enabled: { type: boolean }
+        enrolled: { type: boolean }
+    MFAEnrollment:
+      type: object
+      required: [secret, otpauth_uri, expires_at]
+      properties:
+        secret:
+          type: string
+          description: Secreto TOTP mostrado una sola vez para recuperación manual.
+        otpauth_uri:
+          type: string
+          format: uri
+          description: URI estándar para generar un QR compatible con autenticadores TOTP.
+        expires_at: { type: string, format: date-time }
     RefreshRequest:
       type: object
       additionalProperties: false
@@ -715,7 +949,7 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Transaction' }
         has_more: { type: boolean }
-        next_cursor: { type: string }
+        next_cursor: { type: string, description: Cursor opaco para solicitar la siguiente página }
     MCPTool:
       type: object
       required: [name, read_only, description]

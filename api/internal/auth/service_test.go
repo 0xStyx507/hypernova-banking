@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
@@ -9,7 +10,7 @@ import (
 func TestValidateRegistrationNormalizesEmail(t *testing.T) {
 	validated, err := ValidateRegistration(RegisterInput{
 		Email:    "  Person@Example.com ",
-		Password: "safe-password",
+		Password: "Safe-password1!",
 		FullName: "Person Example",
 	})
 	if err != nil {
@@ -20,8 +21,28 @@ func TestValidateRegistrationNormalizesEmail(t *testing.T) {
 	}
 }
 
+func TestValidateRegistrationPasswordBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		password string
+		valid    bool
+	}{
+		{name: "seven bytes", password: strings.Repeat("a", 7), valid: false},
+		{name: "eight bytes", password: strings.Repeat("a", 8), valid: true},
+		{name: "seventy two bytes", password: strings.Repeat("a", 72), valid: true},
+		{name: "seventy three bytes", password: strings.Repeat("a", 73), valid: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ValidateRegistration(RegisterInput{Email: "person@example.com", Password: test.password, FullName: "Person Example"})
+			if (err == nil) != test.valid {
+				t.Fatalf("expected valid=%t, got error=%v", test.valid, err)
+			}
+		})
+	}
+}
+
 func TestHashPasswordDoesNotReturnPlaintext(t *testing.T) {
-	password := "safe-password"
+	password := "Safe-password1!"
 	hash, err := HashPassword(password, bcrypt.MinCost)
 	if err != nil {
 		t.Fatalf("hash password: %v", err)
@@ -37,7 +58,7 @@ func TestHashPasswordDoesNotReturnPlaintext(t *testing.T) {
 func TestValidateRegistrationRejectsDisplayEmail(t *testing.T) {
 	if _, err := ValidateRegistration(RegisterInput{
 		Email:    "Person <person@example.com>",
-		Password: "safe-password",
+		Password: "Safe-password1!",
 		FullName: "Person Example",
 	}); err == nil {
 		t.Fatal("expected display-name email to be rejected")

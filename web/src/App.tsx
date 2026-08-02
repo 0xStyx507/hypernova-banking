@@ -1,28 +1,12 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Account,
-  ApiError,
-  Balance,
-  HistoryResponse,
-  Operation,
-  Transaction,
-  User,
-  apiClient,
-} from "./api";
-
-type AuthMode = "login" | "register";
-type OperationMode = "deposit" | "withdraw" | "transfer";
-
-interface Session {
-  accessToken: string;
-  refreshToken: string;
-  user: User;
-}
-
-interface FormNotice {
-  tone: "error" | "success";
-  message: string;
-}
+import { Account, ApiError, Balance, HistoryResponse, MFAEnrollment, MFAStatus, MCPAction, MCPActionRequest, MCPTool, OAuthProvider, Operation, apiClient } from "./api";
+import { AuthPage } from "./features/auth/AuthPage";
+import { MFAOnboarding } from "./features/auth/MFAOnboarding";
+import { MFAStatusLoading } from "./features/auth/MFAStatusLoading";
+import { MFAVerificationPage } from "./features/auth/MFAVerificationPage";
+import { DashboardPage } from "./features/dashboard/DashboardPage";
+import { AuthField, AuthFieldErrors, AuthForm, AuthMode, FormNotice, OAuthPending, OperationMode, Session } from "./types";
+import { clearStoredSession, readStoredSession, storeSession } from "./session";
 
 function formatMinorAmount(value: string): string {
   try {
@@ -39,14 +23,46 @@ function formatMinorAmount(value: string): string {
 
 function displayError(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.response.code === "demo_deposit_disabled") {
-      return "El depósito de demostración está desactivado en este entorno.";
-    }
-    if (error.response.code === "insufficient_funds") return "Fondos insuficientes para completar la operación.";
-    if (error.response.code === "idempotency_key_reused") return "La operación ya existe con otra solicitud.";
-    return error.response.error;
+    const messages: Record<string, string> = {
+      invalid_registration: "Revisa los datos: el nombre, correo o contraseña no cumplen los requisitos.",
+      invalid_login: "Revisa tu correo y contraseña antes de intentar nuevamente.",
+      invalid_request: "No pudimos leer los datos. Revisa los campos e inténtalo otra vez.",
+      email_already_in_use: "Ese correo ya tiene una cuenta. Prueba iniciar sesión.",
+      invalid_credentials: "El correo o la contraseña no coinciden.",
+      invalid_access_token: "Tu sesión expiró. Inicia sesión nuevamente.",
+      mfa_unavailable: "No pudimos verificar la protección de tu cuenta. Inténtalo de nuevo.",
+      demo_deposit_disabled: "El depósito de demostración está desactivado en este entorno.",
+      insufficient_funds: "Fondos insuficientes para completar la operación.",
+      mfa_required: "Escribe el código de seis dígitos de tu autenticador.",
+      mfa_invalid_code: "El código MFA no es válido o ya expiró. Revisa tu autenticador.",
+      mfa_enrollment_expired: "El enrolamiento MFA expiró. Genera un QR nuevo.",
+      mfa_already_enabled: "El MFA ya está activo para esta cuenta.",
+      oauth_not_configured: "Este proveedor todavía no está configurado en el entorno.",
+      oauth_invalid_redirect: "El retorno OAuth no está permitido por la configuración del servidor.",
+      oauth_email_conflict: "Ese email ya pertenece a una cuenta vinculada. Inicia sesión y vincula el proveedor desde seguridad.",
+      idempotency_key_reused: "La operación ya existe con otra solicitud.",
+    };
+    return messages[error.response.code] ?? error.response.error;
   }
   return "No pudimos completar la solicitud. Intenta nuevamente.";
+}
+
+function sanitizeFullName(value: string): string {
+  return value.replace(/[^\p{L} ]/gu, "").replace(/\s{2,}/g, " ").slice(0, 120);
+}
+
+function isValidEmail(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/u.test(normalized);
+}
+
+function createIdempotencyKey(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("").replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
 }
 
 function operationLabel(operation: Operation): string {
@@ -55,38 +71,27 @@ function operationLabel(operation: Operation): string {
   return "Transferencia enviada";
 }
 
-function transactionLabel(transaction: Transaction): string {
-  if (transaction.type === "deposit") return "Depósito";
-  if (transaction.type === "withdrawal") return "Retiro";
-  return transaction.direction === "credit" ? "Transferencia recibida" : "Transferencia enviada";
-}
-
-/** Creates a cryptographically strong idempotency key for a write operation. */
-function createIdempotencyKey(): string {
-  if (typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"))
-    .join("")
-    .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
+function sessionFromTokens(tokens: { access_token: string; refresh_token: string; access_expires_at: string; refresh_expires_at: string; user: Session["user"] }): Session {
+  return { accessToken: tokens.access_token, refreshToken: tokens.refresh_token, user: tokens.user, accessExpiresAt: tokens.access_expires_at, refreshExpiresAt: tokens.refresh_expires_at };
 }
 
 function App() {
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<Session | null>(() => readStoredSession());
+  const [sessionReady, setSessionReady] = useState(false);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState<FormNotice | null>(null);
-  const [authForm, setAuthForm] = useState({ email: "", password: "", fullName: "" });
+  const [authFieldErrors, setAuthFieldErrors] = useState<AuthFieldErrors>({});
+  const [authNeedsMFA, setAuthNeedsMFA] = useState(false);
+  const [oauthPending, setOauthPending] = useState<OAuthPending | null>(null);
+  const [authForm, setAuthForm] = useState<AuthForm>({ email: "", password: "", fullName: "", mfaCode: "" });
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [balance, setBalance] = useState<Balance | null>(null);
   const [history, setHistory] = useState<HistoryResponse | null>(null);
+  const [historyPages, setHistoryPages] = useState<HistoryResponse[]>([]);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPageBusy, setHistoryPageBusy] = useState(false);
   const [dashboardLoading, setDashboardLoading] = useState(false);
   const [dashboardError, setDashboardError] = useState("");
   const [operationMode, setOperationMode] = useState<OperationMode>("deposit");
@@ -95,226 +100,317 @@ function App() {
   const [operationBusy, setOperationBusy] = useState(false);
   const [operationNotice, setOperationNotice] = useState<FormNotice | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
+  const [mfaStatus, setMfaStatus] = useState<MFAStatus | null>(null);
+  const [mfaGateReady, setMfaGateReady] = useState(false);
+  const [mfaEnrollment, setMfaEnrollment] = useState<MFAEnrollment | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaBusy, setMfaBusy] = useState(false);
+  const [mfaLoading, setMfaLoading] = useState(false);
+  const [mfaNotice, setMfaNotice] = useState<FormNotice | null>(null);
+  const [mcpTools, setMcpTools] = useState<MCPTool[]>([]);
+  const [mcpLoading, setMcpLoading] = useState(false);
+  const [mcpError, setMcpError] = useState("");
+  const [assistantInput, setAssistantInput] = useState("");
+  const [assistantReply, setAssistantReply] = useState<{ message: string; data?: unknown; confirmation: boolean } | null>(null);
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [mcpAction, setMcpAction] = useState<MCPAction | null>(null);
+  const [mcpActionBusy, setMcpActionBusy] = useState(false);
+  const [mcpActionNotice, setMcpActionNotice] = useState<FormNotice | null>(null);
 
-  const activeAccount = useMemo(
-    () => accounts.find((account) => account.id === selectedAccountId) ?? accounts[0],
-    [accounts, selectedAccountId],
-  );
+  function establishSession(nextSession: Session) {
+    storeSession(nextSession);
+    setSession(nextSession);
+  }
+
+  useEffect(() => {
+    const stored = readStoredSession();
+    if (!stored) {
+      setSessionReady(true);
+      return;
+    }
+    void apiClient.refresh(stored.refreshToken).then((tokens) => {
+      establishSession(sessionFromTokens(tokens));
+    }).catch(() => {
+      clearStoredSession();
+      setSession(null);
+    }).finally(() => setSessionReady(true));
+  }, []);
+
+  useEffect(() => {
+    if (!sessionReady || !session) return;
+    const expiresAt = session.accessExpiresAt ? Date.parse(session.accessExpiresAt) : NaN;
+    if (!Number.isFinite(expiresAt)) return;
+    const refreshIn = Math.max(5_000, expiresAt - Date.now() - 60_000);
+    const timer = window.setTimeout(() => {
+      void apiClient.refresh(session.refreshToken).then((tokens) => {
+        establishSession(sessionFromTokens(tokens));
+      }).catch(() => {
+        clearStoredSession();
+        setSession(null);
+      });
+    }, refreshIn);
+    return () => window.clearTimeout(timer);
+  }, [sessionReady, session]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const provider = params.get("oauth_provider") as OAuthProvider | null;
+    const code = params.get("oauth_code");
+    if (!code || (provider !== "google" && provider !== "github")) return;
+    window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash}`);
+    setAuthBusy(true);
+    void apiClient.exchangeOAuth(provider, code).then((tokens) => {
+      setMfaStatus(null);
+      setMfaGateReady(false);
+      establishSession(sessionFromTokens(tokens));
+      setAuthNotice({ tone: "success", message: "Acceso federado confirmado." });
+    }).catch((error) => {
+      if (error instanceof ApiError && error.response.code === "mfa_required") {
+        setOauthPending({ provider, code });
+        setAuthNeedsMFA(true);
+        setAuthMode("login");
+        setAuthNotice({ tone: "success", message: "Confirma el código de tu autenticador para terminar." });
+      } else setAuthNotice({ tone: "error", message: displayError(error) });
+    }).finally(() => setAuthBusy(false));
+  }, []);
+
+  const activeAccount = useMemo(() => accounts.find((account) => account.id === selectedAccountId) ?? accounts[0], [accounts, selectedAccountId]);
 
   const loadAccounts = useCallback(async () => {
-    if (!session) return;
+    if (!sessionReady || !session || !mfaStatus?.enabled) return;
     try {
       const response = await apiClient.listAccounts({ accessToken: session.accessToken });
       setAccounts(response.items);
       setSelectedAccountId((current) => current || response.items[0]?.id || "");
       setDashboardError("");
-    } catch (error) {
-      setDashboardError(displayError(error));
-    }
-  }, [session]);
+    } catch (error) { setDashboardError(displayError(error)); }
+  }, [sessionReady, session, mfaStatus?.enabled]);
 
   const loadAccountData = useCallback(async () => {
-    if (!session || !selectedAccountId) return;
+    if (!sessionReady || !session || !mfaStatus?.enabled || !selectedAccountId) return;
     setDashboardLoading(true);
     try {
-      const [nextBalance, nextHistory] = await Promise.all([
-        apiClient.getBalance(selectedAccountId, { accessToken: session.accessToken }),
-        apiClient.getHistory(selectedAccountId, { accessToken: session.accessToken, limit: 8 }),
-      ]);
+      const [nextBalance, nextHistory] = await Promise.all([apiClient.getBalance(selectedAccountId, { accessToken: session.accessToken }), apiClient.getHistory(selectedAccountId, { accessToken: session.accessToken, limit: 8 })]);
       setBalance(nextBalance);
       setHistory(nextHistory);
+      setHistoryPages([nextHistory]);
       setDashboardError("");
-    } catch (error) {
-      setDashboardError(displayError(error));
-    } finally {
-      setDashboardLoading(false);
+    } catch (error) { setDashboardError(displayError(error)); }
+    finally { setDashboardLoading(false); }
+  }, [sessionReady, session, mfaStatus?.enabled, selectedAccountId]);
+
+  useEffect(() => { void loadAccounts(); }, [loadAccounts]);
+  useEffect(() => { void loadAccountData(); }, [loadAccountData]);
+
+  const loadMFA = useCallback(async () => {
+    if (!sessionReady || !session) return;
+    setMfaGateReady(false);
+    setMfaLoading(true);
+    try {
+      const status = await apiClient.getMFAStatus({ accessToken: session.accessToken });
+      setMfaStatus(status);
+      if (!status.enabled) setMfaEnrollment(await apiClient.enrollMFA({ accessToken: session.accessToken }));
+    } catch (error) { setMfaNotice({ tone: "error", message: displayError(error) }); }
+    finally { setMfaLoading(false); setMfaGateReady(true); }
+  }, [sessionReady, session]);
+
+  useEffect(() => { void loadMFA(); }, [loadMFA]);
+
+  const loadMCP = useCallback(async () => {
+    if (!sessionReady || !session || !mfaStatus?.enabled) return;
+    setMcpLoading(true);
+    try { setMcpTools((await apiClient.listMCPTools({ accessToken: session.accessToken })).tools); setMcpError(""); }
+    catch (error) { setMcpError(displayError(error)); }
+    finally { setMcpLoading(false); }
+  }, [sessionReady, session, mfaStatus?.enabled]);
+
+  useEffect(() => { void loadMCP(); }, [loadMCP]);
+
+  function validateAuthFields(): boolean {
+    const errors: AuthFieldErrors = {};
+    if (!oauthPending) {
+      if (authMode === "register" && authForm.fullName.trim().length < 2) errors.fullName = "Escribe al menos dos letras en tu nombre.";
+      if (!isValidEmail(authForm.email)) errors.email = "Escribe un correo electrónico válido.";
+      if (!authForm.password) errors.password = "Escribe tu contraseña.";
+      else if (authMode === "register" && (authForm.password.length < 8 || new TextEncoder().encode(authForm.password).length > 72)) errors.password = "La contraseña debe tener entre 8 y 72 caracteres.";
     }
-  }, [session, selectedAccountId]);
+    if ((authMode === "login" && authNeedsMFA) || oauthPending) if (!/^\d{6}$/u.test(authForm.mfaCode)) errors.mfaCode = "Escribe los 6 dígitos de tu autenticador.";
+    setAuthFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  }
 
-  useEffect(() => {
-    void loadAccounts();
-  }, [loadAccounts]);
-
-  useEffect(() => {
-    void loadAccountData();
-  }, [loadAccountData]);
+  function validateAuthField(field: AuthField) {
+    const errors = { ...authFieldErrors };
+    delete errors[field];
+    if (field === "fullName" && authMode === "register" && authForm.fullName.trim().length < 2) errors.fullName = "Escribe al menos dos letras en tu nombre.";
+    if (field === "email" && !oauthPending && !isValidEmail(authForm.email)) errors.email = "Escribe un correo electrónico válido.";
+    if (field === "password" && authMode === "register" && (authForm.password.length < 8 || new TextEncoder().encode(authForm.password).length > 72)) errors.password = "La contraseña debe tener entre 8 y 72 caracteres.";
+    if (field === "mfaCode" && ((authMode === "login" && authNeedsMFA) || oauthPending) && !/^\d{6}$/u.test(authForm.mfaCode)) errors.mfaCode = "Escribe los 6 dígitos de tu autenticador.";
+    setAuthFieldErrors(errors);
+  }
 
   async function handleAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!validateAuthFields()) return;
+    const email = authForm.email.trim().toLowerCase();
     setAuthBusy(true);
     setAuthNotice(null);
     try {
-      if (authMode === "register") {
-        const registration = await apiClient.register({
-          email: authForm.email,
-          password: authForm.password,
-          full_name: authForm.fullName,
-        });
-        const tokens = await apiClient.login({ email: authForm.email, password: authForm.password });
-        setSession({ accessToken: tokens.access_token, refreshToken: tokens.refresh_token, user: tokens.user });
+      if (oauthPending) {
+        const tokens = await apiClient.exchangeOAuth(oauthPending.provider, oauthPending.code, authForm.mfaCode);
+        establishSession(sessionFromTokens(tokens));
+        setMfaStatus(null); setMfaGateReady(false); setOauthPending(null);
+      } else if (authMode === "register") {
+        const registration = await apiClient.register({ email, password: authForm.password, full_name: authForm.fullName });
+        const tokens = await apiClient.login({ email, password: authForm.password });
+        establishSession(sessionFromTokens(tokens));
+        setMfaStatus(null); setMfaGateReady(false);
         setAuthNotice({ tone: "success", message: `Cuenta HNL ${registration.account.status === "active" ? "lista" : "en provisión"}.` });
       } else {
-        const tokens = await apiClient.login({ email: authForm.email, password: authForm.password });
-        setSession({ accessToken: tokens.access_token, refreshToken: tokens.refresh_token, user: tokens.user });
+        const tokens = await apiClient.login({ email, password: authForm.password, mfa_code: authForm.mfaCode || undefined });
+        establishSession(sessionFromTokens(tokens));
+        setMfaStatus(null); setMfaGateReady(false);
       }
-      setAuthForm({ email: "", password: "", fullName: "" });
+      setAuthNeedsMFA(false); setAuthForm({ email: "", password: "", fullName: "", mfaCode: "" }); setAuthFieldErrors({});
     } catch (error) {
-      setAuthNotice({ tone: "error", message: displayError(error) });
-    } finally {
-      setAuthBusy(false);
-    }
+      if (error instanceof ApiError && error.response.code === "mfa_required") setAuthNeedsMFA(true);
+      if (error instanceof ApiError && error.response.code === "mfa_invalid_code") { setAuthFieldErrors((current) => ({ ...current, mfaCode: "El código no es válido. Revisa tu autenticador e inténtalo otra vez." })); setAuthNotice(null); }
+      else setAuthNotice({ tone: "error", message: displayError(error) });
+    } finally { setAuthBusy(false); }
   }
 
   async function handleLogout() {
     if (session) await apiClient.logout(session.accessToken).catch(() => undefined);
-    setSession(null);
-    setAccounts([]);
-    setBalance(null);
-    setHistory(null);
-    setSelectedAccountId("");
+    clearStoredSession();
+    setSession(null); setAccounts([]); setBalance(null); setHistory(null); setHistoryPages([]); setHistoryPage(1); setSelectedAccountId(""); setMfaStatus(null); setMfaGateReady(false); setMfaEnrollment(null); setMfaCode(""); setMfaLoading(false); setMfaNotice(null);
+  }
+
+  function handleFullNameChange(value: string) {
+    const sanitized = sanitizeFullName(value);
+    setAuthForm((current) => ({ ...current, fullName: sanitized }));
+    setAuthFieldErrors((current) => ({ ...current, fullName: value === sanitized ? undefined : "El nombre solo admite letras, ñ, acentos y espacios." }));
+  }
+
+  function handleAuthFieldChange(field: AuthField, value: string) {
+    setAuthForm((current) => ({ ...current, [field]: value }));
+    setAuthFieldErrors((current) => ({ ...current, [field]: undefined }));
+  }
+
+  async function beginMFAEnrollment() {
+    if (!session) return;
+    setMfaBusy(true); setMfaNotice(null);
+    try { setMfaEnrollment(await apiClient.enrollMFA({ accessToken: session.accessToken })); setMfaNotice({ tone: "success", message: "Escanea el QR y confirma con el código actual de tu autenticador." }); }
+    catch (error) { setMfaNotice({ tone: "error", message: displayError(error) }); }
+    finally { setMfaBusy(false); }
+  }
+
+  async function verifyMFAEnrollment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session) return;
+    if (mfaCode.length !== 6) { setMfaNotice({ tone: "error", message: "Escribe los 6 dígitos de tu autenticador." }); return; }
+    setMfaBusy(true); setMfaNotice(null);
+    try { setMfaStatus(await apiClient.verifyMFA(mfaCode, { accessToken: session.accessToken })); setMfaEnrollment(null); setMfaCode(""); setMfaNotice({ tone: "success", message: "MFA activado. Tu próximo inicio de sesión pedirá un código." }); }
+    catch (error) { setMfaNotice({ tone: "error", message: displayError(error) }); }
+    finally { setMfaBusy(false); }
   }
 
   async function handleOperation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!session || !activeAccount) return;
-    setOperationBusy(true);
-    setOperationNotice(null);
+    setOperationBusy(true); setOperationNotice(null);
     const idempotencyKey = createIdempotencyKey();
     try {
       let operation: Operation;
-      if (operationMode === "deposit") {
-        operation = await apiClient.deposit(activeAccount.id, { amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
-      } else if (operationMode === "withdraw") {
-        operation = await apiClient.withdraw(activeAccount.id, { amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
-      } else {
-        operation = await apiClient.transfer({ source_account_id: activeAccount.id, destination_account_id: destinationAccountId, amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
-      }
-      setOperationNotice({ tone: "success", message: `${operationLabel(operation)} por ${formatMinorAmount(operation.amount)}.` });
-      setOperationAmount("");
-      setDestinationAccountId("");
-      await loadAccountData();
+      if (operationMode === "deposit") operation = await apiClient.deposit(activeAccount.id, { amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
+      else if (operationMode === "withdraw") operation = await apiClient.withdraw(activeAccount.id, { amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
+      else operation = await apiClient.transfer({ source_account_id: activeAccount.id, destination_account_id: destinationAccountId, amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
+      setOperationNotice({ tone: "success", message: `${operationLabel(operation)} por ${formatMinorAmount(operation.amount)}.` }); setOperationAmount(""); setDestinationAccountId(""); await loadAccountData();
     } catch (error) {
+      if (error instanceof ApiError && (error.status === 401 || error.response.code === "mfa_required")) { await handleLogout(); setAuthNotice({ tone: "error", message: displayError(error) }); return; }
       setOperationNotice({ tone: "error", message: displayError(error) });
-    } finally {
-      setOperationBusy(false);
-    }
+    } finally { setOperationBusy(false); }
   }
 
   async function loadMoreHistory() {
     if (!session || !selectedAccountId || !history?.next_cursor) return;
-    try {
-      const nextPage = await apiClient.getHistory(selectedAccountId, { accessToken: session.accessToken, limit: 8, cursor: history.next_cursor });
-      setHistory({ items: [...history.items, ...nextPage.items], has_more: nextPage.has_more, next_cursor: nextPage.next_cursor });
-    } catch (error) {
-      setDashboardError(displayError(error));
-    }
+    setHistoryPageBusy(true);
+    try { const nextPage = await apiClient.getHistory(selectedAccountId, { accessToken: session.accessToken, limit: 8, cursor: history.next_cursor }); setHistoryPages((current) => [...current, nextPage]); setHistory(nextPage); setHistoryPage((current) => current + 1); }
+    catch (error) { setDashboardError(displayError(error)); }
+    finally { setHistoryPageBusy(false); }
+  }
+
+  function loadPreviousHistory() {
+    if (historyPage <= 1) return;
+    const previousPage = historyPages[historyPage - 2];
+    if (!previousPage) return;
+    setHistory(previousPage); setHistoryPage((current) => current - 1);
   }
 
   async function handleExport() {
     if (!session || !activeAccount) return;
     setExportBusy(true);
+    try { const blob = await apiClient.exportHistory(activeAccount.id, { accessToken: session.accessToken }); const url = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = url; link.download = "hypernova-transactions.csv"; link.click(); URL.revokeObjectURL(url); }
+    catch (error) { setDashboardError(displayError(error)); }
+    finally { setExportBusy(false); }
+  }
+
+  async function handleAssistantSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session || !assistantInput.trim()) return;
+    setAssistantBusy(true);
+    try { const response = await apiClient.sendChatMessage(assistantInput.trim(), { accessToken: session.accessToken }); setAssistantReply({ message: response.message, data: response.read_only_data, confirmation: response.requires_confirmation }); setAssistantInput(""); }
+    catch (error) { if (error instanceof ApiError && error.status === 401) { await handleLogout(); setAuthNotice({ tone: "error", message: displayError(error) }); return; } setMcpError(displayError(error)); }
+    finally { setAssistantBusy(false); }
+  }
+
+  async function handlePrepareMCPAction(request: MCPActionRequest) {
+    if (!session) return;
+    setMcpActionBusy(true);
+    setMcpActionNotice(null);
     try {
-      const blob = await apiClient.exportHistory(activeAccount.id, { accessToken: session.accessToken });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "hypernova-transactions.csv";
-      link.click();
-      URL.revokeObjectURL(url);
+      setMcpAction(await apiClient.prepareMCPAction(request, { accessToken: session.accessToken }));
     } catch (error) {
-      setDashboardError(displayError(error));
+      setMcpActionNotice({ tone: "error", message: displayError(error) });
     } finally {
-      setExportBusy(false);
+      setMcpActionBusy(false);
     }
   }
 
-  if (!session) {
-    return (
-      <main className="min-h-screen px-5 py-8 text-ink sm:px-10 sm:py-12">
-        <div className="mx-auto grid max-w-6xl gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
-          <section className="space-y-7">
-            <div>
-              <p className="text-sm font-bold uppercase tracking-[0.28em] text-slate-500">Hypernova Banking</p>
-              <h1 className="mt-5 max-w-xl text-5xl font-semibold leading-[0.98] tracking-tight sm:text-7xl">Tu dinero, claro y bajo control.</h1>
-              <p className="mt-6 max-w-lg text-lg leading-8 text-slate-600">Una cuenta HNL con saldos verificables, operaciones idempotentes e historial transparente.</p>
-            </div>
-            <div className="flex flex-wrap gap-3 text-sm font-semibold text-slate-600">
-              <span className="rounded-full bg-white px-4 py-2 shadow-sm">Ledger TigerBeetle</span>
-              <span className="rounded-full bg-white px-4 py-2 shadow-sm">Tokens opacos</span>
-              <span className="rounded-full bg-white px-4 py-2 shadow-sm">HNL minor units</span>
-            </div>
-          </section>
-
-          <section className="surface p-6 sm:p-8">
-            <div className="flex rounded-full bg-slate-100 p-1" role="tablist" aria-label="Acceso">
-              {(["login", "register"] as AuthMode[]).map((mode) => (
-                <button key={mode} className={`flex-1 rounded-full px-4 py-2 text-sm font-bold ${authMode === mode ? "bg-ink text-white" : "text-slate-500"}`} onClick={() => { setAuthMode(mode); setAuthNotice(null); }} role="tab" aria-selected={authMode === mode} type="button">
-                  {mode === "login" ? "Iniciar sesión" : "Crear cuenta"}
-                </button>
-              ))}
-            </div>
-            <form className="mt-7 space-y-5" onSubmit={handleAuth}>
-              {authMode === "register" && <label><span className="field-label">Nombre completo</span><input required minLength={2} value={authForm.fullName} onChange={(event) => setAuthForm({ ...authForm, fullName: event.target.value })} autoComplete="name" /></label>}
-              <label><span className="field-label">Email</span><input required type="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} autoComplete="email" /></label>
-              <label><span className="field-label">Contraseña</span><input required minLength={8} type="password" value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} autoComplete={authMode === "login" ? "current-password" : "new-password"} /></label>
-              {authNotice && <p className={`status-message ${authNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{authNotice.message}</p>}
-              <button className="primary-button w-full" disabled={authBusy} type="submit">{authBusy ? "Procesando…" : authMode === "login" ? "Entrar al dashboard" : "Crear mi cuenta HNL"}</button>
-            </form>
-            <p className="mt-6 text-center text-xs leading-5 text-slate-500">Las credenciales se envían únicamente por HTTPS en producción y los tokens permanecen en memoria durante esta sesión.</p>
-          </section>
-        </div>
-      </main>
-    );
-  }
-
-  return (
-    <main className="min-h-screen px-4 py-5 text-ink sm:px-8 sm:py-8">
-      <div className="mx-auto max-w-7xl space-y-6">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div><p className="text-sm font-bold uppercase tracking-[0.24em] text-slate-500">Hypernova</p><h1 className="mt-1 text-3xl font-semibold tracking-tight">Hola, {session.user.full_name.split(" ")[0]}.</h1></div>
-          <div className="flex items-center gap-3"><span className="hidden text-sm text-slate-500 sm:inline">{session.user.email}</span><button className="secondary-button" onClick={handleLogout} type="button">Cerrar sesión</button></div>
-        </header>
-
-        {dashboardError && <p className="status-message status-error" role="alert">{dashboardError}</p>}
-
-        <div className="grid gap-6 lg:grid-cols-[1.25fr_0.75fr]">
-          <section className="space-y-6">
-            <div className="rounded-[1.75rem] bg-ink p-6 text-white shadow-xl sm:p-9">
-              <div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm text-slate-300">Saldo disponible</p>{dashboardLoading && !balance ? <div className="skeleton mt-5 h-12 w-56 bg-slate-700" /> : <p className="mt-4 text-5xl font-semibold tracking-tight">{formatMinorAmount(balance?.available_balance ?? "0")}</p>}</div><span className="rounded-full bg-white/10 px-3 py-1 text-xs font-bold">{activeAccount?.currency ?? "HNL"}</span></div>
-              <div className="mt-8 grid gap-4 border-t border-white/10 pt-5 text-sm sm:grid-cols-2"><div><p className="text-slate-400">Créditos registrados</p><p className="mt-1 font-semibold">{formatMinorAmount(balance?.credits_posted ?? "0")}</p></div><div><p className="text-slate-400">Débitos registrados</p><p className="mt-1 font-semibold">{formatMinorAmount(balance?.debits_posted ?? "0")}</p></div></div>
-            </div>
-
-            <section className="surface p-5 sm:p-7"><div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Cuenta</p><h2 className="mt-2 text-xl font-semibold">Tu cuenta de uso diario</h2></div>{accounts.length > 0 && <select aria-label="Seleccionar cuenta" className="sm:max-w-xs" value={activeAccount?.id ?? ""} onChange={(event) => setSelectedAccountId(event.target.value)}>{accounts.map((account) => <option key={account.id} value={account.id}>{account.type} · {account.currency} · {account.status}</option>)}</select>}</div></section>
-
-            <section className="surface p-5 sm:p-7"><div className="flex flex-wrap items-start justify-between gap-4"><div><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Actividad</p><h2 className="mt-2 text-xl font-semibold">Historial reciente</h2></div><div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-500">Unidades menores</span><button className="secondary-button" disabled={exportBusy || !activeAccount} onClick={handleExport} type="button">{exportBusy ? "Exportando…" : "CSV"}</button></div></div>{!history && dashboardLoading ? <div className="mt-6 space-y-3"><div className="skeleton h-12 w-full" /><div className="skeleton h-12 w-full" /></div> : history?.items.length ? <div className="mt-5 divide-y divide-slate-100">{history.items.map((transaction) => <TransactionRow key={`${transaction.transfer_id}-${transaction.created_at}`} transaction={transaction} />)}</div> : <div className="mt-6 rounded-2xl bg-slate-50 p-6 text-center text-sm text-slate-500">Todavía no hay movimientos en esta cuenta.</div>}{history?.has_more && <button className="secondary-button mt-5 w-full" onClick={loadMoreHistory} type="button">Cargar movimientos anteriores</button>}</section>
-            <ActivityChart transactions={history?.items ?? []} />
-          </section>
-
-          <section className="surface h-fit p-5 sm:p-7"><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Operar</p><h2 className="mt-2 text-xl font-semibold">Mueve tus fondos</h2><div className="mt-5 grid grid-cols-3 rounded-full bg-slate-100 p-1">{(["deposit", "withdraw", "transfer"] as OperationMode[]).map((mode) => <button key={mode} className={`rounded-full px-2 py-2 text-xs font-bold ${operationMode === mode ? "bg-ink text-white" : "text-slate-500"}`} onClick={() => { setOperationMode(mode); setOperationNotice(null); }} type="button">{mode === "deposit" ? "Depositar" : mode === "withdraw" ? "Retirar" : "Transferir"}</button>)}</div><form className="mt-6 space-y-5" onSubmit={handleOperation}><label><span className="field-label">Importe HNL (unidades menores)</span><input required inputMode="numeric" pattern="[1-9][0-9]*" value={operationAmount} onChange={(event) => setOperationAmount(event.target.value.replace(/\D/g, ""))} placeholder="100000" /></label>{operationMode === "transfer" && <label><span className="field-label">Cuenta destino</span><input required value={destinationAccountId} onChange={(event) => setDestinationAccountId(event.target.value)} placeholder="UUID de la cuenta" /></label>}<div className="rounded-2xl bg-slate-50 p-4 text-xs leading-5 text-slate-500">{operationMode === "deposit" ? "El depósito de demostración está protegido por configuración del entorno." : operationMode === "withdraw" ? "TigerBeetle rechaza débitos que superen los créditos disponibles." : "La cuenta origen siempre es la cuenta seleccionada."}</div>{operationNotice && <p className={`status-message ${operationNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{operationNotice.message}</p>}<button className="primary-button w-full" disabled={operationBusy || !activeAccount} type="submit">{operationBusy ? "Enviando…" : "Confirmar operación"}</button></form></section>
-        </div>
-        <footer className="border-t border-slate-200 pt-5 text-xs text-slate-500">Los importes financieros se manejan como unidades enteras y cada mutación usa una clave de idempotencia.</footer>
-      </div>
-    </main>
-  );
-}
-
-function ActivityChart({ transactions }: { transactions: Transaction[] }) {
-  const points = transactions.slice(0, 6).reverse();
-  if (points.length === 0) return null;
-  const maximum = points.reduce((current, transaction) => {
+  async function handleConfirmMCPAction() {
+    if (!session || !mcpAction) return;
+    setMcpActionBusy(true);
+    setMcpActionNotice(null);
     try {
-      const amount = BigInt(transaction.amount);
-      return amount > current ? amount : current;
-    } catch {
-      return current;
+      setMcpAction(await apiClient.confirmMCPAction(mcpAction.id, { accessToken: session.accessToken }));
+      await loadAccountData();
+    } catch (error) {
+      setMcpActionNotice({ tone: "error", message: displayError(error) });
+    } finally {
+      setMcpActionBusy(false);
     }
-  }, 0n);
+  }
 
-  return <section className="surface p-5 sm:p-7"><div className="flex items-center justify-between"><div><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Tendencia</p><h2 className="mt-2 text-xl font-semibold">Últimos movimientos</h2></div><span className="text-xs text-slate-500">HNL</span></div><div className="mt-6 flex h-28 items-end justify-between gap-3" aria-label="Gráfico de importes recientes" role="img">{points.map((transaction) => { let amount = 0n; try { amount = BigInt(transaction.amount); } catch { /* Ignore malformed display data. */ } const percentage = maximum > 0n ? Number((amount * 100n) / maximum) : 0; return <div className="flex h-full flex-1 flex-col items-center justify-end gap-2" key={`${transaction.transfer_id}-chart`}><div className={`w-full max-w-10 rounded-t-xl ${transaction.direction === "credit" ? "bg-emerald-300" : "bg-ink"}`} style={{ height: `${Math.max(12, percentage)}%` }} title={formatMinorAmount(transaction.amount)} /><span className="text-[10px] font-bold uppercase text-slate-400">{transaction.direction === "credit" ? "C" : "D"}</span></div>; })}</div></section>;
-}
+  async function handleCancelMCPAction() {
+    if (!session || !mcpAction) return;
+    setMcpActionBusy(true);
+    setMcpActionNotice(null);
+    try {
+      setMcpAction(await apiClient.cancelMCPAction(mcpAction.id, { accessToken: session.accessToken }));
+    } catch (error) {
+      setMcpActionNotice({ tone: "error", message: displayError(error) });
+    } finally {
+      setMcpActionBusy(false);
+    }
+  }
 
-function TransactionRow({ transaction }: { transaction: Transaction }) {
-  return <div className="flex items-center justify-between gap-3 py-4"><div className="min-w-0"><p className="truncate text-sm font-bold">{transactionLabel(transaction)}</p><p className="mt-1 text-xs text-slate-400">{new Date(transaction.created_at).toLocaleString("es-PA")}</p></div><p className={`shrink-0 text-sm font-bold ${transaction.direction === "credit" ? "text-emerald-700" : "text-ink"}`}>{transaction.direction === "credit" ? "+" : "−"}{formatMinorAmount(transaction.amount)}</p></div>;
+  if (!sessionReady) return <MFAStatusLoading notice={null} onLogout={handleLogout} />;
+  if (!session) {
+    if (authNeedsMFA || oauthPending) return <MFAVerificationPage email={authForm.email} code={authForm.mfaCode} busy={authBusy} notice={authNotice} fieldError={authFieldErrors.mfaCode} oauth={Boolean(oauthPending)} onCodeChange={(value) => handleAuthFieldChange("mfaCode", value)} onSubmit={handleAuth} onBack={() => { setAuthNeedsMFA(false); setOauthPending(null); setAuthForm((current) => ({ ...current, mfaCode: "" })); setAuthFieldErrors({}); setAuthNotice(null); }} />;
+    return <AuthPage mode={authMode} busy={authBusy} notice={authNotice} fieldErrors={authFieldErrors} form={authForm} oauthPending={oauthPending} onModeChange={(mode) => { setAuthMode(mode); setAuthNotice(null); setAuthFieldErrors({}); }} onFieldChange={handleAuthFieldChange} onFullNameChange={handleFullNameChange} onFieldBlur={validateAuthField} onSubmit={handleAuth} onOAuth={(provider) => apiClient.startOAuth(provider)} />;
+  }
+  if (!mfaGateReady || mfaStatus === null) return <MFAStatusLoading notice={mfaNotice} onLogout={handleLogout} />;
+  if (!mfaStatus.enabled) return <MFAOnboarding user={session.user} enrollment={mfaEnrollment} code={mfaCode} busy={mfaBusy} loading={mfaLoading} notice={mfaNotice} onCodeChange={setMfaCode} onBegin={beginMFAEnrollment} onVerify={verifyMFAEnrollment} onLogout={handleLogout} />;
+  return <DashboardPage user={session.user} accounts={accounts} activeAccount={activeAccount} balance={balance} history={history} historyPage={historyPage} dashboardLoading={dashboardLoading} dashboardError={dashboardError} operationMode={operationMode} operationAmount={operationAmount} destinationAccountId={destinationAccountId} operationBusy={operationBusy} operationNotice={operationNotice} exportBusy={exportBusy} mcpTools={mcpTools} mcpLoading={mcpLoading} mcpError={mcpError} assistantInput={assistantInput} assistantReply={assistantReply} assistantBusy={assistantBusy} mcpAction={mcpAction} mcpActionBusy={mcpActionBusy} mcpActionNotice={mcpActionNotice} historyHasMore={Boolean(history?.has_more)} historyPageBusy={historyPageBusy} onAccountChange={(accountId) => { setSelectedAccountId(accountId); setBalance(null); setHistory(null); setHistoryPages([]); setHistoryPage(1); }} onOperationModeChange={(mode) => { setOperationMode(mode); setOperationNotice(null); }} onAmountChange={setOperationAmount} onDestinationChange={setDestinationAccountId} onOperation={handleOperation} onExport={handleExport} onPreviousHistory={loadPreviousHistory} onNextHistory={loadMoreHistory} onAssistantInput={setAssistantInput} onAssistantSubmit={handleAssistantSubmit} onPrepareMCPAction={(request) => void handlePrepareMCPAction(request)} onConfirmMCPAction={() => void handleConfirmMCPAction()} onCancelMCPAction={() => void handleCancelMCPAction()} onLogout={handleLogout} />;
 }
 
 export default App;

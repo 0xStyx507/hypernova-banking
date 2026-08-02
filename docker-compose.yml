@@ -43,12 +43,22 @@ services:
       API_PORT: ${API_PORT:-8080}
       DATABASE_URL: ${DATABASE_URL:-postgres://hypernova:change-me-local-only@postgres:5432/hypernova?sslmode=disable}
       TIGERBEETLE_ADDRESS: ${TIGERBEETLE_ADDRESS:-tigerbeetle:3000}
-      # This is an explicit local-demo clearing channel. Production must set
-      # LEDGER_ALLOW_DEMO_DEPOSITS=false and use a trusted funding workflow.
-      LEDGER_ALLOW_DEMO_DEPOSITS: ${LEDGER_ALLOW_DEMO_DEPOSITS:-false}
+      # Local manual testing only. Production must set this to false and use
+      # a trusted funding workflow instead of the demo clearing account.
+      LEDGER_ALLOW_DEMO_DEPOSITS: ${LEDGER_ALLOW_DEMO_DEPOSITS:-true}
       AUTH_ACCESS_TTL: ${AUTH_ACCESS_TTL:-15m}
       AUTH_REFRESH_TTL: ${AUTH_REFRESH_TTL:-168h}
       API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-120}
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_REDIRECT_URL: ${GOOGLE_OAUTH_REDIRECT_URL:-http://localhost:8080/api/v1/auth/oauth/google/callback}
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
+      GITHUB_OAUTH_CLIENT_SECRET: ${GITHUB_OAUTH_CLIENT_SECRET:-}
+      GITHUB_OAUTH_REDIRECT_URL: ${GITHUB_OAUTH_REDIRECT_URL:-http://localhost:8080/api/v1/auth/oauth/github/callback}
+      OAUTH_STATE_TTL: ${OAUTH_STATE_TTL:-10m}
+      OAUTH_EXCHANGE_TTL: ${OAUTH_EXCHANGE_TTL:-2m}
+      OAUTH_ALLOWED_REDIRECT_URIS: ${OAUTH_ALLOWED_REDIRECT_URIS:-http://localhost:4173/,http://127.0.0.1:4173/,hypernova://oauth}
     ports:
       - "${API_PORT:-8080}:8080"
     # The official TigerBeetle client uses io_uring and locked buffers. Keep
