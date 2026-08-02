@@ -55,6 +55,14 @@ select:focus {
   text-transform: uppercase;
 }
 
+.field-help {
+  color: #718096;
+  display: block;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  margin-top: 0.45rem;
+}
+
 .surface {
   border: 1px solid #e1e6ec;
   border-radius: 1.5rem;
@@ -120,6 +128,42 @@ select:focus {
 .status-success {
   background: #ecfdf5;
   color: #116746;
+}
+
+.status-pill {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 0.75rem;
+  font-weight: 800;
+  padding: 0.45rem 0.75rem;
+  white-space: nowrap;
+}
+
+.status-pill-success {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.status-pill-neutral {
+  background: #edf2f7;
+  color: #526174;
+}
+
+.qr-card {
+  align-items: center;
+  background: #fff;
+  border: 1px solid #e1e6ec;
+  border-radius: 1rem;
+  display: flex;
+  justify-content: center;
+  max-width: 100%;
+  padding: 0.8rem;
+  width: fit-content;
+}
+
+@media (max-width: 420px) {
+  .surface { border-radius: 1.1rem; }
+  .primary-button, .secondary-button { min-height: 3rem; }
 }
 
 .skeleton {

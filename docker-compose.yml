@@ -49,6 +49,7 @@ services:
       AUTH_ACCESS_TTL: ${AUTH_ACCESS_TTL:-15m}
       AUTH_REFRESH_TTL: ${AUTH_REFRESH_TTL:-168h}
       API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-120}
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
     ports:
       - "${API_PORT:-8080}:8080"
     # The official TigerBeetle client uses io_uring and locked buffers. Keep

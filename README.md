@@ -108,6 +108,14 @@ Endpoints de autenticación:
 - `POST /api/v1/auth/login`
 - `POST /api/v1/auth/refresh`
 - `POST /api/v1/auth/logout` con `Authorization: Bearer <access_token>`
+- `GET /api/v1/auth/mfa` con `Authorization: Bearer <access_token>`
+- `POST /api/v1/auth/mfa/enroll` devuelve una URI `otpauth://` para el QR
+- `POST /api/v1/auth/mfa/verify` activa el TOTP con un código de seis dígitos
+
+El MFA usa el perfil TOTP estándar de 30 segundos, SHA-1 y seis dígitos. La URI
+de enrolamiento es compatible con Google Authenticator y Microsoft
+Authenticator; el secreto se cifra antes de guardarse en PostgreSQL y solo se
+devuelve durante el enrolamiento.
 
 Endpoints financieros:
 

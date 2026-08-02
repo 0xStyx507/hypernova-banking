@@ -1,9 +1,12 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import {
   Account,
   ApiError,
   Balance,
   HistoryResponse,
+  MFAEnrollment,
+  MFAStatus,
   Operation,
   Transaction,
   User,
@@ -43,6 +46,10 @@ function displayError(error: unknown): string {
       return "El depósito de demostración está desactivado en este entorno.";
     }
     if (error.response.code === "insufficient_funds") return "Fondos insuficientes para completar la operación.";
+    if (error.response.code === "mfa_required") return "Escribe el código de seis dígitos de tu autenticador.";
+    if (error.response.code === "mfa_invalid_code") return "El código MFA no es válido o ya expiró. Revisa tu autenticador.";
+    if (error.response.code === "mfa_enrollment_expired") return "El enrolamiento MFA expiró. Genera un QR nuevo.";
+    if (error.response.code === "mfa_already_enabled") return "El MFA ya está activo para esta cuenta.";
     if (error.response.code === "idempotency_key_reused") return "La operación ya existe con otra solicitud.";
     return error.response.error;
   }
@@ -82,7 +89,8 @@ function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authBusy, setAuthBusy] = useState(false);
   const [authNotice, setAuthNotice] = useState<FormNotice | null>(null);
-  const [authForm, setAuthForm] = useState({ email: "", password: "", fullName: "" });
+  const [authNeedsMFA, setAuthNeedsMFA] = useState(false);
+  const [authForm, setAuthForm] = useState({ email: "", password: "", fullName: "", mfaCode: "" });
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccountId, setSelectedAccountId] = useState("");
   const [balance, setBalance] = useState<Balance | null>(null);
@@ -95,6 +103,11 @@ function App() {
   const [operationBusy, setOperationBusy] = useState(false);
   const [operationNotice, setOperationNotice] = useState<FormNotice | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
+  const [mfaStatus, setMfaStatus] = useState<MFAStatus | null>(null);
+  const [mfaEnrollment, setMfaEnrollment] = useState<MFAEnrollment | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaBusy, setMfaBusy] = useState(false);
+  const [mfaNotice, setMfaNotice] = useState<FormNotice | null>(null);
 
   const activeAccount = useMemo(
     () => accounts.find((account) => account.id === selectedAccountId) ?? accounts[0],
@@ -139,6 +152,19 @@ function App() {
     void loadAccountData();
   }, [loadAccountData]);
 
+  const loadMFA = useCallback(async () => {
+    if (!session) return;
+    try {
+      setMfaStatus(await apiClient.getMFAStatus({ accessToken: session.accessToken }));
+    } catch (error) {
+      setMfaNotice({ tone: "error", message: displayError(error) });
+    }
+  }, [session]);
+
+  useEffect(() => {
+    void loadMFA();
+  }, [loadMFA]);
+
   async function handleAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAuthBusy(true);
@@ -154,11 +180,13 @@ function App() {
         setSession({ accessToken: tokens.access_token, refreshToken: tokens.refresh_token, user: tokens.user });
         setAuthNotice({ tone: "success", message: `Cuenta HNL ${registration.account.status === "active" ? "lista" : "en provisión"}.` });
       } else {
-        const tokens = await apiClient.login({ email: authForm.email, password: authForm.password });
+        const tokens = await apiClient.login({ email: authForm.email, password: authForm.password, mfa_code: authForm.mfaCode || undefined });
         setSession({ accessToken: tokens.access_token, refreshToken: tokens.refresh_token, user: tokens.user });
       }
-      setAuthForm({ email: "", password: "", fullName: "" });
+      setAuthNeedsMFA(false);
+      setAuthForm({ email: "", password: "", fullName: "", mfaCode: "" });
     } catch (error) {
+      if (error instanceof ApiError && error.response.code === "mfa_required") setAuthNeedsMFA(true);
       setAuthNotice({ tone: "error", message: displayError(error) });
     } finally {
       setAuthBusy(false);
@@ -172,6 +200,42 @@ function App() {
     setBalance(null);
     setHistory(null);
     setSelectedAccountId("");
+    setMfaStatus(null);
+    setMfaEnrollment(null);
+    setMfaCode("");
+    setMfaNotice(null);
+  }
+
+  async function beginMFAEnrollment() {
+    if (!session) return;
+    setMfaBusy(true);
+    setMfaNotice(null);
+    try {
+      setMfaEnrollment(await apiClient.enrollMFA({ accessToken: session.accessToken }));
+      setMfaNotice({ tone: "success", message: "Escanea el QR y confirma con el código actual de tu autenticador." });
+    } catch (error) {
+      setMfaNotice({ tone: "error", message: displayError(error) });
+    } finally {
+      setMfaBusy(false);
+    }
+  }
+
+  async function verifyMFAEnrollment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session || mfaCode.length !== 6) return;
+    setMfaBusy(true);
+    setMfaNotice(null);
+    try {
+      const status = await apiClient.verifyMFA(mfaCode, { accessToken: session.accessToken });
+      setMfaStatus(status);
+      setMfaEnrollment(null);
+      setMfaCode("");
+      setMfaNotice({ tone: "success", message: "MFA activado. Tu próximo inicio de sesión pedirá un código." });
+    } catch (error) {
+      setMfaNotice({ tone: "error", message: displayError(error) });
+    } finally {
+      setMfaBusy(false);
+    }
   }
 
   async function handleOperation(event: FormEvent<HTMLFormElement>) {
@@ -257,6 +321,7 @@ function App() {
               {authMode === "register" && <label><span className="field-label">Nombre completo</span><input required minLength={2} value={authForm.fullName} onChange={(event) => setAuthForm({ ...authForm, fullName: event.target.value })} autoComplete="name" /></label>}
               <label><span className="field-label">Email</span><input required type="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} autoComplete="email" /></label>
               <label><span className="field-label">Contraseña</span><input required minLength={8} type="password" value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} autoComplete={authMode === "login" ? "current-password" : "new-password"} /></label>
+              {authMode === "login" && authNeedsMFA && <label><span className="field-label">Código del autenticador</span><input required inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={authForm.mfaCode} onChange={(event) => setAuthForm({ ...authForm, mfaCode: event.target.value.replace(/\D/g, "") })} autoComplete="one-time-code" placeholder="000000" /><span className="field-help">Abre Google Authenticator o Microsoft Authenticator y escribe el código vigente.</span></label>}
               {authNotice && <p className={`status-message ${authNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{authNotice.message}</p>}
               <button className="primary-button w-full" disabled={authBusy} type="submit">{authBusy ? "Procesando…" : authMode === "login" ? "Entrar al dashboard" : "Crear mi cuenta HNL"}</button>
             </form>
@@ -292,6 +357,19 @@ function App() {
 
           <section className="surface h-fit p-5 sm:p-7"><p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Operar</p><h2 className="mt-2 text-xl font-semibold">Mueve tus fondos</h2><div className="mt-5 grid grid-cols-3 rounded-full bg-slate-100 p-1">{(["deposit", "withdraw", "transfer"] as OperationMode[]).map((mode) => <button key={mode} className={`rounded-full px-2 py-2 text-xs font-bold ${operationMode === mode ? "bg-ink text-white" : "text-slate-500"}`} onClick={() => { setOperationMode(mode); setOperationNotice(null); }} type="button">{mode === "deposit" ? "Depositar" : mode === "withdraw" ? "Retirar" : "Transferir"}</button>)}</div><form className="mt-6 space-y-5" onSubmit={handleOperation}><label><span className="field-label">Importe HNL (unidades menores)</span><input required inputMode="numeric" pattern="[1-9][0-9]*" value={operationAmount} onChange={(event) => setOperationAmount(event.target.value.replace(/\D/g, ""))} placeholder="100000" /></label>{operationMode === "transfer" && <label><span className="field-label">Cuenta destino</span><input required value={destinationAccountId} onChange={(event) => setDestinationAccountId(event.target.value)} placeholder="UUID de la cuenta" /></label>}<div className="rounded-2xl bg-slate-50 p-4 text-xs leading-5 text-slate-500">{operationMode === "deposit" ? "El depósito de demostración está protegido por configuración del entorno." : operationMode === "withdraw" ? "TigerBeetle rechaza débitos que superen los créditos disponibles." : "La cuenta origen siempre es la cuenta seleccionada."}</div>{operationNotice && <p className={`status-message ${operationNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{operationNotice.message}</p>}<button className="primary-button w-full" disabled={operationBusy || !activeAccount} type="submit">{operationBusy ? "Enviando…" : "Confirmar operación"}</button></form></section>
         </div>
+        <section className="surface p-5 sm:p-7">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-bold uppercase tracking-[0.18em] text-slate-400">Seguridad</p>
+              <h2 className="mt-2 text-xl font-semibold">Autenticación multifactor</h2>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Protege el inicio de sesión con un código TOTP compatible con Google Authenticator y Microsoft Authenticator.</p>
+            </div>
+            <span className={`status-pill ${mfaStatus?.enabled ? "status-pill-success" : "status-pill-neutral"}`}>{mfaStatus?.enabled ? "Activo" : "No configurado"}</span>
+          </div>
+          {!mfaStatus?.enabled && !mfaEnrollment && <button className="primary-button mt-5" disabled={mfaBusy} onClick={beginMFAEnrollment} type="button">{mfaBusy ? "Generando QR…" : "Configurar MFA"}</button>}
+          {mfaEnrollment && <div className="mt-6 grid gap-6 md:grid-cols-[auto_1fr] md:items-center"><div className="qr-card"><QRCodeSVG value={mfaEnrollment.otpauth_uri} size={192} includeMargin /></div><div className="min-w-0"><p className="text-sm font-semibold text-ink">1. Escanea este QR en tu autenticador</p><p className="mt-2 text-sm leading-6 text-slate-500">Si no puedes escanearlo, usa el secreto manual. El enrolamiento expira a las {new Date(mfaEnrollment.expires_at).toLocaleTimeString("es-PA", { hour: "2-digit", minute: "2-digit" })}.</p><p className="mt-3 break-all rounded-xl bg-slate-50 p-3 font-mono text-xs text-slate-600">{mfaEnrollment.secret}</p><form className="mt-4 flex flex-col gap-3 sm:flex-row" onSubmit={verifyMFAEnrollment}><input required inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={mfaCode} onChange={(event) => setMfaCode(event.target.value.replace(/\D/g, ""))} placeholder="Código de 6 dígitos" autoComplete="one-time-code" aria-label="Código MFA" /><button className="primary-button shrink-0" disabled={mfaBusy || mfaCode.length !== 6} type="submit">{mfaBusy ? "Verificando…" : "Activar MFA"}</button></form></div></div>}
+          {mfaNotice && <p className={`status-message mt-4 ${mfaNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{mfaNotice.message}</p>}
+        </section>
         <footer className="border-t border-slate-200 pt-5 text-xs text-slate-500">Los importes financieros se manejan como unidades enteras y cada mutación usa una clave de idempotencia.</footer>
       </div>
     </main>

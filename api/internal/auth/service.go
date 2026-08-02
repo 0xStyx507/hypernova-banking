@@ -47,6 +47,9 @@ type Config struct {
 	AccessTTL  time.Duration
 	RefreshTTL time.Duration
 	BcryptCost int
+	// MFAEncryptionKey encrypts TOTP secrets before they are persisted.
+	// Production deployments must provide a stable 32-byte secret.
+	MFAEncryptionKey []byte
 }
 
 // RequestMetadata contains non-secret request context for audit records.
@@ -85,6 +88,7 @@ type Service struct {
 	accessTTL  time.Duration
 	refreshTTL time.Duration
 	bcryptCost int
+	mfaKey     []byte
 }
 
 // NewService creates an authentication service with safe defaults for omitted
@@ -99,7 +103,7 @@ func NewService(pool *pgxpool.Pool, config Config) *Service {
 	if config.BcryptCost < bcrypt.MinCost {
 		config.BcryptCost = defaultBcryptCost
 	}
-	return &Service{pool: pool, accessTTL: config.AccessTTL, refreshTTL: config.RefreshTTL, bcryptCost: config.BcryptCost}
+	return &Service{pool: pool, accessTTL: config.AccessTTL, refreshTTL: config.RefreshTTL, bcryptCost: config.BcryptCost, mfaKey: append([]byte(nil), config.MFAEncryptionKey...)}
 }
 
 // ValidateRegistration validates and normalizes user input without touching
@@ -189,8 +193,15 @@ func (s *Service) Register(ctx context.Context, input RegisterInput, metadata Re
 	return user, nil
 }
 
-// Login verifies credentials and rotates a new session into existence.
+// Login preserves the original password-only service contract for callers
+// that do not yet collect a second factor.
 func (s *Service) Login(ctx context.Context, email, password string, metadata RequestMetadata) (Tokens, error) {
+	return s.LoginWithMFA(ctx, email, password, "", metadata)
+}
+
+// LoginWithMFA verifies credentials, an enabled TOTP factor when required,
+// and rotates a new session into existence.
+func (s *Service) LoginWithMFA(ctx context.Context, email, password, totpCode string, metadata RequestMetadata) (Tokens, error) {
 	if s == nil || s.pool == nil {
 		return Tokens{}, fmt.Errorf("authentication service is not configured")
 	}
@@ -202,10 +213,13 @@ func (s *Service) Login(ctx context.Context, email, password string, metadata Re
 	var user User
 	var passwordHash string
 	var active bool
+	var mfaEnabled bool
+	var encryptedMFASecret []byte
 	err = s.pool.QueryRow(ctx, `
-		SELECT id, email, password_hash, full_name, created_at, active
+		SELECT id, email, password_hash, full_name, created_at, active,
+		       mfa_enabled, mfa_secret_encrypted
 		FROM users WHERE LOWER(email) = $1
-	`, email).Scan(&user.ID, &user.Email, &passwordHash, &user.FullName, &user.CreatedAt, &active)
+	`, email).Scan(&user.ID, &user.Email, &passwordHash, &user.FullName, &user.CreatedAt, &active, &mfaEnabled, &encryptedMFASecret)
 	if err != nil || !active || bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)) != nil {
 		var userID *uuid.UUID
 		if err == nil {
@@ -213,6 +227,11 @@ func (s *Service) Login(ctx context.Context, email, password string, metadata Re
 		}
 		_ = recordAudit(ctx, s.pool, userID, "login_failure", nil, metadata)
 		return Tokens{}, ErrInvalidCredentials
+	}
+	if mfaEnabled {
+		if err := s.verifyLoginMFA(ctx, user.ID, encryptedMFASecret, totpCode, metadata); err != nil {
+			return Tokens{}, err
+		}
 	}
 
 	tx, err := s.pool.Begin(ctx)

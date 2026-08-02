@@ -12,6 +12,8 @@ export interface Balance { account_id: string; currency: Currency; balance: stri
 export interface Transaction { transfer_id: string; type: OperationMode; direction: "credit" | "debit"; amount: string; currency: Currency; created_at: string }
 export interface History { items: Transaction[]; has_more: boolean; next_cursor?: string }
 export interface Tokens { user: User; access_token: string; refresh_token: string; access_expires_at: string; refresh_expires_at: string }
+export interface MFAStatus { enabled: boolean; enrolled: boolean }
+export interface MFAEnrollment { secret: string; otpauth_uri: string; expires_at: string }
 export interface Operation { id: string; type: OperationMode; status: string; transfer_id: string; amount: string; currency: Currency; created_at: string }
 export interface ApiErrorBody { error: string; code: string }
 
@@ -42,8 +44,11 @@ async function request<T>(path: string, init: RequestInit = {}, accessToken?: st
 
 export const mobileApi = {
   register(input: { email: string; password: string; full_name: string }) { return request<{ user: User; account: Account }>("/v1/auth/register", { method: "POST", body: JSON.stringify(input) }); },
-  login(input: { email: string; password: string }) { return request<Tokens>("/v1/auth/login", { method: "POST", body: JSON.stringify(input) }); },
+  login(input: { email: string; password: string; mfa_code?: string }) { return request<Tokens>("/v1/auth/login", { method: "POST", body: JSON.stringify(input) }); },
   logout(accessToken: string) { return request<void>("/v1/auth/logout", { method: "POST" }, accessToken); },
+  mfaStatus(accessToken: string) { return request<MFAStatus>("/v1/auth/mfa", {}, accessToken); },
+  enrollMFA(accessToken: string) { return request<MFAEnrollment>("/v1/auth/mfa/enroll", { method: "POST" }, accessToken); },
+  verifyMFA(code: string, accessToken: string) { return request<MFAStatus>("/v1/auth/mfa/verify", { method: "POST", body: JSON.stringify({ code }) }, accessToken); },
   accounts(accessToken: string) { return request<{ items: Account[] }>("/v1/accounts", {}, accessToken); },
   balance(accountId: string, accessToken: string) { return request<Balance>(`/v1/accounts/${accountId}/balance`, {}, accessToken); },
   history(accountId: string, accessToken: string) { return request<History>(`/v1/accounts/${accountId}/transactions?limit=8`, {}, accessToken); },

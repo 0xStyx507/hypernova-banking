@@ -68,6 +68,18 @@ export interface RegisterRequest {
 export interface LoginRequest {
   email: string;
   password: string;
+  mfa_code?: string;
+}
+
+export interface MFAStatus {
+  enabled: boolean;
+  enrolled: boolean;
+}
+
+export interface MFAEnrollment {
+  secret: string;
+  otpauth_uri: string;
+  expires_at: string;
 }
 
 export interface RefreshRequest {
@@ -227,6 +239,18 @@ export class ApiClient {
 
   logout(accessToken: string, options: RequestOptions = {}): Promise<void> {
     return request<void>("/v1/auth/logout", { method: "POST" }, { ...options, accessToken });
+  }
+
+  getMFAStatus(options: AuthenticatedRequestOptions): Promise<MFAStatus> {
+    return request<MFAStatus>("/v1/auth/mfa", {}, options);
+  }
+
+  enrollMFA(options: AuthenticatedRequestOptions): Promise<MFAEnrollment> {
+    return request<MFAEnrollment>("/v1/auth/mfa/enroll", { method: "POST" }, options);
+  }
+
+  verifyMFA(code: string, options: AuthenticatedRequestOptions): Promise<MFAStatus> {
+    return request<MFAStatus>("/v1/auth/mfa/verify", { method: "POST" }, { ...options, body: { code } });
   }
 
   createAccount(

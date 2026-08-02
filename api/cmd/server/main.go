@@ -91,9 +91,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	mfaKey, err := auth.MFAEncryptionKey(os.Getenv("MFA_ENCRYPTION_KEY"), os.Getenv("DATABASE_URL"))
+	if err != nil {
+		logger.Error("MFA encryption key initialization failed", "error", err)
+		os.Exit(1)
+	}
 	authService := auth.NewService(persistence, auth.Config{
-		AccessTTL:  durationFromEnv("AUTH_ACCESS_TTL", 15*time.Minute),
-		RefreshTTL: durationFromEnv("AUTH_REFRESH_TTL", 7*24*time.Hour),
+		AccessTTL:        durationFromEnv("AUTH_ACCESS_TTL", 15*time.Minute),
+		RefreshTTL:       durationFromEnv("AUTH_REFRESH_TTL", 7*24*time.Hour),
+		MFAEncryptionKey: mfaKey,
 	})
 	mcpService := mcp.NewService(persistence, ledgerService)
 	mcpClient := mcp.NewClient(mcp.ClientConfig{BaseURL: "http://127.0.0.1:" + apiPort(os.Getenv("API_PORT")) + "/api/v1/mcp"})
