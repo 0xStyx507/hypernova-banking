@@ -1,17 +1,3 @@
-declare namespace NodeJS {
-  interface ProcessEnv {
-    EXPO_PUBLIC_API_BASE_URL?: string;
-  }
-}
+/// <reference types="expo/types" />
 
-// NativeWind's JSX transform adds className at runtime. Keep the prop visible
-// to TypeScript even when the Expo plugin has not generated its declaration.
-import "react-native";
-
-declare module "react-native" {
-  interface ViewProps { className?: string }
-  interface TextProps { className?: string }
-  interface TextInputProps { className?: string }
-  interface ScrollViewProps { className?: string }
-  interface PressableProps { className?: string }
-}
+// NOTE: This file should not be edited and should be in your git ignore
