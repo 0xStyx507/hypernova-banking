@@ -1,0 +1,807 @@
+openapi: 3.0.3
+info:
+  title: Hypernova Banking API
+  version: 1.0.0
+  license:
+    name: Proprietary technical assessment implementation
+    url: https://github.com/0xStyx507/hypernova-banking
+  description: |
+    Contrato HTTP de Hypernova Banking.
+
+    Incluye identidad, sesiones, auditoría, cuentas HNL y movimientos
+    financieros respaldados por TigerBeetle. Los importes son unidades menores
+    enteras serializadas como cadenas para evitar redondeos de punto flotante.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Desarrollo local
+# Public health and authentication operations opt in to security below; an
+# empty root requirement makes the security posture explicit for every path.
+security: []
+tags:
+  - name: Health
+    description: Probes operativos de la API
+  - name: Authentication
+    description: Registro y gestión de sesiones
+  - name: Ledger
+    description: Cuentas y movimientos financieros respaldados por TigerBeetle
+  - name: MCP
+    description: Herramientas autenticadas con preparación y confirmación explícita
+  - name: Assistant
+    description: Chat autenticado con proveedor local y herramientas MCP de solo lectura
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Comprueba que el proceso está activo
+      tags: [Health]
+      responses:
+        '200':
+          description: Proceso disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '404':
+          description: Ruta no encontrada
+  /readyz:
+    get:
+      operationId: getReadiness
+      summary: Comprueba que PostgreSQL está disponible
+      tags: [Health]
+      responses:
+        '200':
+          description: Servicio listo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Dependencia no disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Ruta no encontrada
+  /api/v1/health:
+    get:
+      operationId: getVersionedHealth
+      summary: Comprueba que el proceso está activo
+      tags: [Health]
+      responses:
+        '200':
+          description: Proceso disponible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '404':
+          description: Ruta no encontrada
+  /api/v1/auth/register:
+    post:
+      operationId: registerUser
+      summary: Registra una identidad
+      description: El email se normaliza a minúsculas y debe ser único.
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Identidad creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationResponse'
+        '400':
+          description: JSON inválido, campos desconocidos o datos fuera de las reglas de validación
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: El email ya está registrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/auth/login:
+    post:
+      operationId: loginUser
+      summary: Crea una sesión autenticada
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Credenciales válidas y sesión creada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensResponse'
+        '400':
+          description: JSON inválido, campos desconocidos o cuerpo incompleto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Credenciales inválidas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/auth/refresh:
+    post:
+      operationId: refreshSession
+      summary: Rota una sesión usando su refresh token
+      description: El refresh token anterior queda inutilizable después de una rotación exitosa.
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Sesión rotada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensResponse'
+        '400':
+          description: JSON inválido, campos desconocidos o cuerpo incompleto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Refresh token inválido, expirado, revocado o reutilizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/auth/logout:
+    post:
+      operationId: logoutUser
+      summary: Revoca la sesión asociada al access token
+      description: La operación es idempotente; requiere el esquema Bearer y no revela si el token corresponde a una sesión activa.
+      tags: [Authentication]
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Sesión revocada o ya revocada
+        '401':
+          description: Falta un Bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/accounts:
+    post:
+      operationId: createAccount
+      summary: Crea una cuenta HNL para el usuario autenticado
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAccountRequest'
+      responses:
+        '201':
+          description: Cuenta provisionada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          description: Solicitud inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    get:
+      operationId: listAccounts
+      summary: Lista las cuentas propias
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Cuentas del usuario
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Account' }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/accounts/{account_id}:
+    get:
+      operationId: getAccount
+      summary: Obtiene una cuenta propia
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      responses:
+        '200':
+          description: Cuenta
+          content: { application/json: { schema: { $ref: '#/components/schemas/Account' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/accounts/{account_id}/balance:
+    get:
+      operationId: getAccountBalance
+      summary: Lee el saldo desde TigerBeetle
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      responses:
+        '200':
+          description: Saldos en unidades menores
+          content: { application/json: { schema: { $ref: '#/components/schemas/Balance' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/accounts/{account_id}/transactions:
+    get:
+      operationId: listAccountTransactions
+      summary: Lista el historial reciente de una cuenta
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          description: Cursor numérico opaco devuelto por la página anterior
+          schema: { type: string }
+      responses:
+        '200':
+          description: Transferencias más recientes primero
+          content: { application/json: { schema: { $ref: '#/components/schemas/HistoryResponse' } } }
+        '400':
+          description: Límite inválido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/accounts/{account_id}/transactions.csv:
+    get:
+      operationId: exportAccountTransactionsCsv
+      summary: Exporta el historial reciente en CSV
+      description: Exporta como máximo 100 movimientos después de comprobar la propiedad de la cuenta.
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      responses:
+        '200':
+          description: Archivo CSV de movimientos
+          content:
+            text/csv:
+              schema: { type: string, format: binary }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/accounts/{account_id}/deposits:
+    post:
+      operationId: createDeposit
+      summary: Acredita fondos mediante la cuenta de compensación
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MovementRequest' } } }
+      responses:
+        '200':
+          description: Operación registrada
+          content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } }
+        '400':
+          description: Solicitud o clave de idempotencia inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: Clave reutilizada con otra solicitud
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '403':
+          description: Canal de depósito demo deshabilitado
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '503':
+          description: Ledger no disponible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/accounts/{account_id}/withdrawals:
+    post:
+      operationId: createWithdrawal
+      summary: Debita fondos hacia la cuenta de compensación
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MovementRequest' } } }
+      responses:
+        '200':
+          description: Operación registrada
+          content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } }
+        '422':
+          description: Fondos insuficientes
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/transfers:
+    post:
+      operationId: createTransfer
+      summary: Transfiere fondos entre dos cuentas HNL
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/TransferRequest' } } }
+      responses:
+        '200':
+          description: Transferencia registrada
+          content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } }
+        '422':
+          description: Fondos insuficientes o cuenta inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/tools:
+    get:
+      operationId: listMCPTools
+      summary: Lista herramientas disponibles para el cliente asistido
+      description: Las herramientas de lectura son seguras para consulta; las mutaciones siempre requieren una acción preparada y confirmación explícita.
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Herramientas disponibles
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPToolsResponse' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/tools/call:
+    post:
+      operationId: callMCPTool
+      summary: Ejecuta una consulta MCP o prepara una intención
+      description: Las consultas no mutan el ledger; prepare_financial_action solo crea una acción pendiente.
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MCPToolCallRequest' } } }
+      responses:
+        '200':
+          description: Resultado de la herramienta
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPToolCallResponse' } } }
+        '400':
+          description: Herramienta o argumentos inválidos
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Herramienta inexistente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions:
+    post:
+      operationId: prepareMCPAction
+      summary: Prepara una acción financiera sin ejecutarla
+      description: Persiste una intención por cinco minutos. No cambia el saldo ni crea una transferencia en TigerBeetle.
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MCPActionRequest' } } }
+      responses:
+        '201':
+          description: Acción lista para confirmación
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPAction' } } }
+        '400':
+          description: Acción inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions/{action_id}:
+    get:
+      operationId: getMCPAction
+      summary: Consulta el estado de una acción preparada
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ActionID'
+      responses:
+        '200':
+          description: Acción preparada
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPAction' } } }
+        '404':
+          description: Acción inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions/{action_id}/confirm:
+    post:
+      operationId: confirmMCPAction
+      summary: Confirma y ejecuta una acción financiera
+      description: 'Requiere el cuerpo exacto { confirmation: CONFIRM }. El ID de la acción se reutiliza como clave idempotente.'
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ActionID'
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MCPConfirmationRequest' } } }
+      responses:
+        '200':
+          description: Acción ejecutada
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPAction' } } }
+        '400':
+          description: Falta confirmación explícita
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: Acción no puede confirmarse en su estado actual
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions/{action_id}/cancel:
+    post:
+      operationId: cancelMCPAction
+      summary: Cancela una acción antes de su ejecución
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/ActionID'
+      responses:
+        '200':
+          description: Acción cancelada
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPAction' } } }
+        '409':
+          description: Acción ya confirmada o en estado incompatible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/chat/messages:
+    post:
+      operationId: sendChatMessage
+      summary: Envía un mensaje al asistente bancario
+      description: El proveedor local puede consultar herramientas de solo lectura; las operaciones financieras siempre requieren el flujo MCP de preparación y confirmación.
+      tags: [Assistant]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ChatRequest' } } }
+      responses:
+        '200':
+          description: Respuesta del asistente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ChatResponse' } } }
+        '400':
+          description: Mensaje inválido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '502':
+          description: Asistente o MCP no disponible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+          example: hypernova-api
+    ErrorResponse:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+          description: Mensaje público y no sensible del error
+          example: invalid credentials
+        code:
+          type: string
+          description: Código estable para clientes
+          example: insufficient_funds
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password, full_name]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Email sin nombre visible; se recorta y normaliza a minúsculas.
+          example: person@example.com
+        password:
+          type: string
+          format: password
+          minLength: 8
+          maxLength: 72
+          description: Entre 8 y 72 bytes antes de aplicar bcrypt.
+        full_name:
+          type: string
+          minLength: 2
+          maxLength: 120
+          description: Nombre visible, entre 2 y 120 caracteres Unicode.
+          example: Person Example
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: person@example.com
+        password:
+          type: string
+          format: password
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          description: Token opaco emitido por login o refresh.
+    User:
+      type: object
+      required: [id, email, full_name, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        full_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    RegistrationResponse:
+      type: object
+      required: [user, account]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        account:
+          $ref: '#/components/schemas/Account'
+    TokensResponse:
+      type: object
+      required: [user, access_token, refresh_token, access_expires_at, refresh_expires_at]
+      properties:
+        user:
+          $ref: '#/components/schemas/User'
+        access_token:
+          type: string
+          description: Token opaco; nunca es un JWT.
+        refresh_token:
+          type: string
+          description: Token opaco de rotación; nunca es un JWT.
+        access_expires_at:
+          type: string
+          format: date-time
+        refresh_expires_at:
+          type: string
+          format: date-time
+    CreateAccountRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        currency:
+          type: string
+          enum: [HNL]
+          default: HNL
+    MovementRequest:
+      type: object
+      additionalProperties: false
+      required: [amount]
+      properties:
+        amount:
+          type: string
+          pattern: '^[1-9][0-9]*$'
+          description: Unidades menores enteras, nunca un número de punto flotante
+          example: '125000'
+        currency:
+          type: string
+          enum: [HNL]
+          default: HNL
+    TransferRequest:
+      allOf:
+        - $ref: '#/components/schemas/MovementRequest'
+        - type: object
+          required: [source_account_id, destination_account_id]
+          properties:
+            source_account_id: { type: string, format: uuid }
+            destination_account_id: { type: string, format: uuid }
+    Account:
+      type: object
+      required: [id, currency, type, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        currency: { type: string, enum: [HNL] }
+        type: { type: string, enum: [checking] }
+        status: { type: string, enum: [provisioning, active, failed] }
+        created_at: { type: string, format: date-time }
+    Balance:
+      type: object
+      required: [account_id, currency, balance, available_balance, credits_posted, debits_posted, credits_pending, debits_pending]
+      properties:
+        account_id: { type: string, format: uuid }
+        currency: { type: string, enum: [HNL] }
+        balance: { type: string, pattern: '^[0-9]+$' }
+        available_balance: { type: string, pattern: '^[0-9]+$' }
+        credits_posted: { type: string, pattern: '^[0-9]+$' }
+        debits_posted: { type: string, pattern: '^[0-9]+$' }
+        credits_pending: { type: string, pattern: '^[0-9]+$' }
+        debits_pending: { type: string, pattern: '^[0-9]+$' }
+    Operation:
+      type: object
+      required: [id, type, status, transfer_id, amount, currency, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [deposit, withdrawal, transfer] }
+        status: { type: string, enum: [succeeded] }
+        transfer_id: { type: string }
+        amount: { type: string, pattern: '^[1-9][0-9]*$' }
+        currency: { type: string, enum: [HNL] }
+        created_at: { type: string, format: date-time }
+    Transaction:
+      type: object
+      required: [transfer_id, type, direction, amount, currency, created_at]
+      properties:
+        transfer_id: { type: string }
+        type: { type: string, enum: [deposit, withdrawal, transfer] }
+        direction: { type: string, enum: [credit, debit] }
+        amount: { type: string, pattern: '^[1-9][0-9]*$' }
+        currency: { type: string, enum: [HNL] }
+        created_at: { type: string, format: date-time }
+    HistoryResponse:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Transaction' }
+        has_more: { type: boolean }
+        next_cursor: { type: string }
+    MCPTool:
+      type: object
+      required: [name, read_only, description]
+      properties:
+        name: { type: string }
+        read_only: { type: boolean }
+        description: { type: string }
+    MCPToolsResponse:
+      type: object
+      required: [protocol, tools]
+      properties:
+        protocol: { type: string, example: hypernova-mcp-http/1 }
+        tools:
+          type: array
+          items: { $ref: '#/components/schemas/MCPTool' }
+    MCPActionRequest:
+      type: object
+      additionalProperties: false
+      required: [action, amount]
+      properties:
+        action: { type: string, enum: [deposit, withdrawal, transfer] }
+        account_id: { type: string, format: uuid }
+        source_account_id: { type: string, format: uuid }
+        destination_account_id: { type: string, format: uuid }
+        amount: { type: string, pattern: '^[1-9][0-9]*$' }
+        currency: { type: string, enum: [HNL], default: HNL }
+        reason: { type: string, maxLength: 280 }
+    MCPConfirmationRequest:
+      type: object
+      additionalProperties: false
+      required: [confirmation]
+      properties:
+        confirmation: { type: string, enum: [CONFIRM] }
+    MCPToolCallRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, example: get_accounts }
+        arguments:
+          type: object
+          additionalProperties: true
+    MCPToolCallResponse:
+      type: object
+      required: [name, result]
+      properties:
+        name: { type: string }
+        result: {}
+    ChatRequest:
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message: { type: string, minLength: 1, maxLength: 2000 }
+    ChatResponse:
+      type: object
+      required: [message, requires_confirmation]
+      properties:
+        message: { type: string }
+        requires_confirmation: { type: boolean }
+        read_only_data: {}
+    MCPAction:
+      type: object
+      required: [id, action, status, payload, expires_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        action: { type: string, enum: [deposit, withdrawal, transfer] }
+        status: { type: string, enum: [ready, confirming, confirmed, cancelled, expired, failed] }
+        payload: { $ref: '#/components/schemas/MCPActionRequest' }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        confirmed_at: { type: string, format: date-time }
+        operation: { $ref: '#/components/schemas/Operation' }
+  parameters:
+    AccountID:
+      name: account_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    ActionID:
+      name: action_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }

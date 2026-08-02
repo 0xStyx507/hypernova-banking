@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +9,7 @@ import (
 )
 
 func TestHealthEndpoints(t *testing.T) {
-	router := newRouter()
+	router := newRouter(nil, readyReadiness{}, nil)
 	paths := []string{"/healthz", "/readyz", "/api/v1/health"}
 
 	for _, path := range paths {
@@ -35,6 +36,16 @@ func TestHealthEndpoints(t *testing.T) {
 	}
 }
 
+func TestReadinessFailsWithoutDatabase(t *testing.T) {
+	router := newRouter(nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	res := httptest.NewRecorder()
+	router.ServeHTTP(res, req)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", res.Code)
+	}
+}
+
 func TestAPIPort(t *testing.T) {
 	if got := apiPort(""); got != defaultAPIPort {
 		t.Fatalf("expected default port %q, got %q", defaultAPIPort, got)
@@ -43,3 +54,16 @@ func TestAPIPort(t *testing.T) {
 		t.Fatalf("expected configured port, got %q", got)
 	}
 }
+
+func TestResolveLedgerAddress(t *testing.T) {
+	if got, err := resolveLedgerAddress("127.0.0.1:3000"); err != nil || got != "127.0.0.1:3000" {
+		t.Fatalf("expected numeric ledger address, got %q, %v", got, err)
+	}
+	if _, err := resolveLedgerAddress("not-an-address"); err == nil {
+		t.Fatal("expected malformed ledger address to fail")
+	}
+}
+
+type readyReadiness struct{}
+
+func (readyReadiness) Ping(context.Context) error { return nil }

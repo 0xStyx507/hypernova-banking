@@ -3,6 +3,7 @@
 !.env.example
 
 data/
+datos-prueba-HNL.json
 node_modules/
 dist/
 .expo/
@@ -14,5 +15,10 @@ dist/
 coverage/
 bin/
 
-docs/phase-1-data-migration.md
+docs/phase-*.md
+docs/roadmap.md
+docs/phase-history.md
 .github
+\.agents/
+AGENTS.md
+prueba-tecnica.html
