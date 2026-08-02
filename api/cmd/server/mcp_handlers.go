@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -36,7 +37,7 @@ func registerMCPRoutes(router chi.Router, authService *auth.Service, service *mc
 	}
 	handler := mcpHandler{service: service, ledger: ledgerService}
 	router.Route("/api/v1/mcp", func(router chi.Router) {
-		router.Use(ledgerAuthentication(authService))
+		router.Use(ledgerAuthentication(authService), requireMFA(authService))
 		router.Get("/tools", handler.tools)
 		router.Post("/tools/call", handler.callTool)
 		router.Post("/actions", handler.prepare)
@@ -54,8 +55,6 @@ func (h mcpHandler) tools(w http.ResponseWriter, _ *http.Request) {
 			{"name": "get_balance", "read_only": true, "description": "Read a TigerBeetle-backed HNL balance."},
 			{"name": "get_transactions", "read_only": true, "description": "Read account history with cursor pagination."},
 			{"name": "prepare_financial_action", "read_only": false, "description": "Prepare a deposit, withdrawal, or transfer for explicit confirmation."},
-			{"name": "confirm_financial_action", "read_only": false, "description": "Execute a previously prepared action after confirmation."},
-			{"name": "cancel_financial_action", "read_only": false, "description": "Cancel a prepared action before execution."},
 		},
 	})
 }
@@ -99,7 +98,19 @@ func (h mcpHandler) callTool(w http.ResponseWriter, r *http.Request) {
 			arguments.Limit = 50
 		}
 		items, historyErr := h.ledger.History(r.Context(), userID, arguments.AccountID, arguments.Limit, arguments.Cursor)
-		result, err = map[string]any{"items": items, "has_more": len(items) == int(arguments.Limit)}, historyErr
+		if historyErr != nil {
+			result, err = nil, historyErr
+			break
+		}
+		hasMore := len(items) > int(arguments.Limit)
+		if hasMore {
+			items = items[:arguments.Limit]
+		}
+		nextCursor := ""
+		if hasMore && len(items) > 0 {
+			nextCursor = strconv.FormatInt(items[len(items)-1].CreatedAt.UnixNano(), 10)
+		}
+		result, err = map[string]any{"items": items, "has_more": hasMore, "next_cursor": nextCursor}, nil
 	case "prepare_financial_action":
 		var arguments mcp.ActionRequest
 		if json.Unmarshal(request.Arguments, &arguments) != nil {

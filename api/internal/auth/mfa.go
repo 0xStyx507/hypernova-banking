@@ -93,6 +93,26 @@ func (s *Service) EnrollMFA(ctx context.Context, userID uuid.UUID, metadata Requ
 	if s == nil || s.pool == nil || len(s.mfaKey) != 32 {
 		return MFAEnrollment{}, ErrMFAUnavailable
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return MFAEnrollment{}, fmt.Errorf("begin MFA enrollment: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var enabled bool
+	if err := tx.QueryRow(ctx, `
+		SELECT mfa_enabled
+		FROM users
+		WHERE id = $1 AND active
+		FOR UPDATE
+	`, userID).Scan(&enabled); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MFAEnrollment{}, ErrInvalidCredentials
+		}
+		return MFAEnrollment{}, fmt.Errorf("read MFA enrollment state: %w", err)
+	}
+	if enabled {
+		return MFAEnrollment{}, ErrMFAAlreadyEnabled
+	}
 	secret, err := newMFASecret()
 	if err != nil {
 		return MFAEnrollment{}, err
@@ -102,17 +122,12 @@ func (s *Service) EnrollMFA(ctx context.Context, userID uuid.UUID, metadata Requ
 		return MFAEnrollment{}, err
 	}
 	expiresAt := time.Now().UTC().Add(mfaEnrollmentLifetime)
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return MFAEnrollment{}, fmt.Errorf("begin MFA enrollment: %w", err)
-	}
-	defer tx.Rollback(ctx)
 	var accountName string
 	if err := tx.QueryRow(ctx, `
 		UPDATE users
 		SET mfa_secret_encrypted = $1, mfa_enabled = FALSE,
 		    mfa_enrollment_expires_at = $2, updated_at = NOW()
-		WHERE id = $3 AND active
+		WHERE id = $3 AND active AND mfa_enabled = FALSE
 		RETURNING email
 	`, ciphertext, expiresAt, userID).Scan(&accountName); err != nil {
 		return MFAEnrollment{}, fmt.Errorf("store MFA enrollment: %w", err)
@@ -142,6 +157,68 @@ func (s *Service) MFAStatus(ctx context.Context, userID uuid.UUID) (MFAStatus, e
 		return MFAStatus{}, fmt.Errorf("read MFA status: %w", err)
 	}
 	return status, nil
+}
+
+// MFAEnabled reports whether the authenticated user completed enrollment.
+// Financial and account routes use this check as a server-side authorization
+// boundary; the web client must never be the only MFA gate.
+func (s *Service) MFAEnabled(ctx context.Context, userID uuid.UUID) (bool, error) {
+	if s == nil || s.pool == nil {
+		return false, ErrMFAUnavailable
+	}
+	var enabled bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT mfa_enabled
+		FROM users
+		WHERE id = $1 AND active
+	`, userID).Scan(&enabled); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrInvalidCredentials
+		}
+		return false, fmt.Errorf("read MFA authorization state: %w", err)
+	}
+	return enabled, nil
+}
+
+// MarkSessionMFAVerified binds the successful enrollment to the current
+// bearer session without granting MFA status to older sessions.
+func (s *Service) MarkSessionMFAVerified(ctx context.Context, accessToken string, userID uuid.UUID) error {
+	if s == nil || s.pool == nil || strings.TrimSpace(accessToken) == "" {
+		return ErrInvalidAccessToken
+	}
+	commandTag, err := s.pool.Exec(ctx, `
+		UPDATE sessions
+		SET mfa_verified_at = NOW(), last_used_at = NOW()
+		WHERE access_token_hash = $1 AND user_id = $2 AND revoked_at IS NULL AND access_expires_at > NOW()
+	`, tokenHash(accessToken), userID)
+	if err != nil {
+		return fmt.Errorf("mark session MFA verification: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return ErrInvalidAccessToken
+	}
+	return nil
+}
+
+// IsSessionMFAVerified checks the authorization level of the presented
+// session. It is intentionally separate from the user's enrollment state.
+func (s *Service) IsSessionMFAVerified(ctx context.Context, accessToken string) (bool, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(accessToken) == "" {
+		return false, ErrInvalidAccessToken
+	}
+	var verified bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT mfa_verified_at IS NOT NULL
+		FROM sessions
+		WHERE access_token_hash = $1 AND revoked_at IS NULL AND access_expires_at > NOW()
+	`, tokenHash(accessToken)).Scan(&verified)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrInvalidAccessToken
+		}
+		return false, fmt.Errorf("read session MFA verification: %w", err)
+	}
+	return verified, nil
 }
 
 // VerifyMFA activates an enrollment only after a valid current TOTP code.

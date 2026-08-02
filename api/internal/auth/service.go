@@ -50,6 +50,8 @@ type Config struct {
 	// MFAEncryptionKey encrypts TOTP secrets before they are persisted.
 	// Production deployments must provide a stable 32-byte secret.
 	MFAEncryptionKey []byte
+	// OAuth contains provider endpoints and short-lived artifact settings.
+	OAuth OAuthConfig
 }
 
 // RequestMetadata contains non-secret request context for audit records.
@@ -89,6 +91,7 @@ type Service struct {
 	refreshTTL time.Duration
 	bcryptCost int
 	mfaKey     []byte
+	oauth      OAuthConfig
 }
 
 // NewService creates an authentication service with safe defaults for omitted
@@ -103,7 +106,14 @@ func NewService(pool *pgxpool.Pool, config Config) *Service {
 	if config.BcryptCost < bcrypt.MinCost {
 		config.BcryptCost = defaultBcryptCost
 	}
-	return &Service{pool: pool, accessTTL: config.AccessTTL, refreshTTL: config.RefreshTTL, bcryptCost: config.BcryptCost, mfaKey: append([]byte(nil), config.MFAEncryptionKey...)}
+	return &Service{
+		pool:       pool,
+		accessTTL:  config.AccessTTL,
+		refreshTTL: config.RefreshTTL,
+		bcryptCost: config.BcryptCost,
+		mfaKey:     append([]byte(nil), config.MFAEncryptionKey...),
+		oauth:      config.OAuth,
+	}
 }
 
 // ValidateRegistration validates and normalizes user input without touching
@@ -239,7 +249,7 @@ func (s *Service) LoginWithMFA(ctx context.Context, email, password, totpCode st
 		return Tokens{}, fmt.Errorf("begin login: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	tokens, err := s.createSession(ctx, tx, user, metadata, "login")
+	tokens, err := s.createSession(ctx, tx, user, metadata, "login", mfaEnabled)
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -363,7 +373,7 @@ func (s *Service) Authenticate(ctx context.Context, accessToken string) (uuid.UU
 	return userID, nil
 }
 
-func (s *Service) createSession(ctx context.Context, executor audit.Executor, user User, metadata RequestMetadata, event string) (Tokens, error) {
+func (s *Service) createSession(ctx context.Context, executor audit.Executor, user User, metadata RequestMetadata, event string, mfaVerified bool) (Tokens, error) {
 	accessToken, err := generateToken()
 	if err != nil {
 		return Tokens{}, err
@@ -376,10 +386,14 @@ func (s *Service) createSession(ctx context.Context, executor audit.Executor, us
 	accessExpiresAt := now.Add(s.accessTTL)
 	refreshExpiresAt := now.Add(s.refreshTTL)
 	sessionID := uuid.New()
+	var mfaVerifiedAt any
+	if mfaVerified {
+		mfaVerifiedAt = now
+	}
 	if _, err := executor.Exec(ctx, `
-		INSERT INTO sessions (id, user_id, access_token_hash, refresh_token_hash, access_expires_at, refresh_expires_at, ip_address, user_agent)
-		VALUES ($1, $2, $3, $4, $5, $6, $7::inet, $8)
-	`, sessionID, user.ID, tokenHash(accessToken), tokenHash(refreshToken), accessExpiresAt, refreshExpiresAt, nullableIP(metadata.IPAddress), truncate(metadata.UserAgent, 512)); err != nil {
+		INSERT INTO sessions (id, user_id, access_token_hash, refresh_token_hash, access_expires_at, refresh_expires_at, mfa_verified_at, ip_address, user_agent)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9)
+	`, sessionID, user.ID, tokenHash(accessToken), tokenHash(refreshToken), accessExpiresAt, refreshExpiresAt, mfaVerifiedAt, nullableIP(metadata.IPAddress), truncate(metadata.UserAgent, 512)); err != nil {
 		return Tokens{}, fmt.Errorf("insert session: %w", err)
 	}
 	if err := recordAudit(ctx, executor, &user.ID, event, map[string]any{"session_id": sessionID.String()}, metadata); err != nil {

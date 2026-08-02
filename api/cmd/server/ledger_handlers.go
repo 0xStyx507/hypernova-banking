@@ -45,7 +45,7 @@ type historyResponse struct {
 func registerLedgerRoutes(router chi.Router, authService *auth.Service, service *ledger.Service) {
 	handler := ledgerHandler{service: service}
 	router.Route("/api/v1", func(router chi.Router) {
-		router.Use(ledgerAuthentication(authService))
+		router.Use(ledgerAuthentication(authService), requireMFA(authService))
 		router.Post("/accounts", handler.createAccount)
 		router.Get("/accounts", handler.listAccounts)
 		router.Get("/accounts/{account_id}", handler.getAccount)
@@ -56,6 +56,39 @@ func registerLedgerRoutes(router chi.Router, authService *auth.Service, service 
 		router.Post("/accounts/{account_id}/withdrawals", handler.withdraw)
 		router.Post("/transfers", handler.transfer)
 	})
+}
+
+// requireMFA is a server-side authorization boundary for account data and
+// money movement. Enrollment endpoints remain available behind the base
+// session middleware so a new user can activate MFA before using the ledger.
+func requireMFA(service *auth.Service) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			userID := authenticatedUser(r)
+			token := bearerToken(r.Header.Get("Authorization"))
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			enabled, err := service.MFAEnabled(ctx, userID)
+			if err != nil {
+				writeErrorCode(w, http.StatusServiceUnavailable, "mfa_unavailable", "multi-factor authentication is unavailable")
+				return
+			}
+			if !enabled {
+				writeErrorCode(w, http.StatusForbidden, "mfa_required", "complete multi-factor authentication before accessing account data")
+				return
+			}
+			verified, err := service.IsSessionMFAVerified(ctx, token)
+			if err != nil {
+				writeErrorCode(w, http.StatusUnauthorized, "invalid_access_token", "invalid access token")
+				return
+			}
+			if !verified {
+				writeErrorCode(w, http.StatusForbidden, "mfa_required", "complete multi-factor authentication before accessing account data")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func ledgerAuthentication(service *auth.Service) func(http.Handler) http.Handler {
@@ -143,11 +176,15 @@ func (h ledgerHandler) getHistory(w http.ResponseWriter, r *http.Request) {
 		writeLedgerError(w, err)
 		return
 	}
+	hasMore := len(items) > int(limit)
+	if hasMore {
+		items = items[:limit]
+	}
 	nextCursor := ""
-	if len(items) == int(limit) && len(items) > 0 {
+	if hasMore && len(items) > 0 {
 		nextCursor = strconv.FormatInt(items[len(items)-1].CreatedAt.UnixNano(), 10)
 	}
-	writeJSON(w, http.StatusOK, historyResponse{Items: items, HasMore: nextCursor != "", NextCursor: nextCursor})
+	writeJSON(w, http.StatusOK, historyResponse{Items: items, HasMore: hasMore, NextCursor: nextCursor})
 }
 
 // exportHistory writes a bounded, ownership-checked CSV snapshot. It uses the
@@ -158,6 +195,9 @@ func (h ledgerHandler) exportHistory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeLedgerError(w, err)
 		return
+	}
+	if len(items) > 100 {
+		items = items[:100]
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="hypernova-transactions.csv"`)
@@ -280,8 +320,4 @@ func writeLedgerError(w http.ResponseWriter, err error) {
 	default:
 		writeErrorCode(w, http.StatusInternalServerError, "internal_error", "financial operation failed")
 	}
-}
-
-func writeErrorCode(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]string{"error": message, "code": code})
 }

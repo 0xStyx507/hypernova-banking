@@ -5,6 +5,7 @@
  */
 export type Currency = "HNL";
 export type OperationMode = "deposit" | "withdrawal" | "transfer";
+export type OAuthProvider = "google" | "github";
 
 export interface User { id: string; email: string; full_name: string; created_at: string }
 export interface Account { id: string; currency: Currency; type: "checking"; status: string; created_at: string }
@@ -24,7 +25,26 @@ export class MobileApiError extends Error {
   }
 }
 
-const baseUrl = (process.env.EXPO_PUBLIC_API_BASE_URL ?? "http://localhost:8080/api").replace(/\/$/, "");
+import Constants from "expo-constants";
+
+/**
+ * Resolves the API host for both a simulator and a physical device.
+ *
+ * `localhost` is correct for an emulator only. Expo Go publishes its LAN
+ * host in `hostUri`, so a phone can reach the API container on the same Wi-Fi
+ * network without requiring a machine-specific value in source control.
+ */
+function resolveBaseUrl(): string {
+  const configuredUrl = process.env.EXPO_PUBLIC_API_BASE_URL;
+  if (configuredUrl) return configuredUrl.replace(/\/$/, "");
+
+  const expoHost = Constants.expoConfig?.hostUri?.split(":")[0];
+  if (expoHost) return `http://${expoHost}:8080/api`;
+
+  return "http://localhost:8080/api";
+}
+
+const baseUrl = resolveBaseUrl();
 
 async function request<T>(path: string, init: RequestInit = {}, accessToken?: string, idempotencyKey?: string): Promise<T> {
   const headers = new Headers(init.headers);
@@ -45,6 +65,9 @@ async function request<T>(path: string, init: RequestInit = {}, accessToken?: st
 export const mobileApi = {
   register(input: { email: string; password: string; full_name: string }) { return request<{ user: User; account: Account }>("/v1/auth/register", { method: "POST", body: JSON.stringify(input) }); },
   login(input: { email: string; password: string; mfa_code?: string }) { return request<Tokens>("/v1/auth/login", { method: "POST", body: JSON.stringify(input) }); },
+  /** Builds the browser redirect URL without putting credentials in the deep link. */
+  oauthStartUrl(provider: OAuthProvider, returnTo: string) { return `${baseUrl}/v1/auth/oauth/${provider}/start?return_to=${encodeURIComponent(returnTo)}`; },
+  exchangeOAuth(provider: OAuthProvider, code: string, mfaCode?: string) { return request<Tokens>(`/v1/auth/oauth/${provider}/exchange`, { method: "POST", body: JSON.stringify({ code, mfa_code: mfaCode || undefined }) }); },
   logout(accessToken: string) { return request<void>("/v1/auth/logout", { method: "POST" }, accessToken); },
   mfaStatus(accessToken: string) { return request<MFAStatus>("/v1/auth/mfa", {}, accessToken); },
   enrollMFA(accessToken: string) { return request<MFAEnrollment>("/v1/auth/mfa/enroll", { method: "POST" }, accessToken); },

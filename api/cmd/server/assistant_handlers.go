@@ -24,7 +24,7 @@ func registerAssistantRoutes(router chi.Router, authService *auth.Service, servi
 	}
 	handler := assistantHandler{service: service}
 	router.Route("/api/v1/chat", func(router chi.Router) {
-		router.Use(ledgerAuthentication(authService))
+		router.Use(ledgerAuthentication(authService), requireMFA(authService))
 		router.Post("/messages", handler.message)
 	})
 }

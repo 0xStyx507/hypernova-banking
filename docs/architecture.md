@@ -4,6 +4,33 @@ Hypernova Banking es un monolito modular que combina identidad en PostgreSQL,
 contabilidad financiera en TigerBeetle y clientes web/mobile que consumen un
 contrato HTTP común.
 
+## Diseño de dominio
+
+El sistema aplica DDD de forma incremental dentro de un único proceso. Cada
+módulo es un contexto delimitado con reglas y casos de uso propios; no se
+comparten entidades mutables entre módulos ni se convierten las rutas HTTP en
+la lógica del negocio.
+
+| Contexto | Código | Responsabilidad principal |
+| --- | --- | --- |
+| Identidad y acceso | `api/internal/auth` | Usuarios, sesiones, tokens y MFA |
+| Cuentas y ledger | `api/internal/ledger` | Ownership, saldos y movimientos en TigerBeetle |
+| Aprobaciones | `api/internal/mcp` | Intención persistida, confirmación, expiración e idempotencia |
+| Asistente | `api/internal/assistant` | Conversación y acceso controlado a herramientas |
+| Auditoría | `api/internal/audit` | Evidencia de eventos de seguridad y operaciones |
+| Infraestructura | `api/internal/db` | PostgreSQL, migraciones y conexión de persistencia |
+
+`api/cmd/server` funciona como adaptador de entrada: decodifica HTTP, aplica
+guards y traduce errores a contratos públicos. Los servicios internos son la
+capa de aplicación y dominio; PostgreSQL y TigerBeetle son adaptadores de
+infraestructura. React y Expo solo presentan el contrato, por lo que nunca
+deciden autorización, ownership, saldo o reglas monetarias.
+
+Las unidades menores se mantienen como enteros decimales y los cambios
+financieros pasan por el caso de uso del ledger. Esta separación permite
+extraer repositorios o adaptadores en el futuro sin convertir el proyecto en
+microservicios ni añadir infraestructura no requerida.
+
 ## Responsabilidades
 
 - PostgreSQL: usuarios, sesiones, auditoría, propiedad de cuentas, operaciones

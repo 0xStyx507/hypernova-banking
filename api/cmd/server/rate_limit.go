@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -71,10 +70,7 @@ func (limiter *rateLimiter) allow(key string) bool {
 }
 
 func clientAddress(r *http.Request) string {
-	address := strings.TrimSpace(r.RemoteAddr)
-	if host, _, err := net.SplitHostPort(address); err == nil {
-		return host
-	}
+	address := strings.TrimSpace(clientAddressFromRequest(r))
 	if address == "" {
 		return "unknown"
 	}

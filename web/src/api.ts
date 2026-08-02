@@ -114,6 +114,63 @@ export interface TokensResponse {
   refresh_expires_at: string;
 }
 
+export type OAuthProvider = "google" | "github";
+
+export interface OAuthCallbackResponse {
+  user: User;
+  exchange_code: string;
+  expires_at: string;
+  account?: Account;
+}
+
+export interface MCPTool {
+  name: string;
+  read_only: boolean;
+  description: string;
+}
+
+export interface MCPToolsResponse {
+  protocol: string;
+  tools: MCPTool[];
+}
+
+export interface MCPToolCallResponse {
+  name: string;
+  result: unknown;
+}
+
+export type MCPActionType = "deposit" | "withdrawal" | "transfer";
+
+export interface MCPActionRequest {
+  action: MCPActionType;
+  account_id?: string;
+  source_account_id?: string;
+  destination_account_id?: string;
+  /** Integer minor units encoded as a decimal string. */
+  amount: string;
+  currency: Currency;
+  reason?: string;
+}
+
+export type MCPActionPayload = MCPActionRequest;
+
+export interface MCPAction {
+  id: string;
+  action: MCPActionType;
+  status: "ready" | "confirming" | "confirmed" | "cancelled" | "expired";
+  payload: MCPActionPayload;
+  expires_at: string;
+  created_at: string;
+  confirmed_at?: string;
+  operation?: Operation;
+}
+
+export interface ChatResponse {
+  message: string;
+  requires_confirmation: boolean;
+  read_only_data?: unknown;
+}
+
 export interface Operation {
   id: string;
   type: OperationType;
@@ -232,6 +289,22 @@ export class ApiClient {
     return request<TokensResponse>("/v1/auth/login", { method: "POST" }, { ...options, body: input });
   }
 
+  /** Starts the provider redirect; credentials never pass through the SPA. */
+  startOAuth(provider: OAuthProvider): void {
+    const endpoint = new URL(joinApiPath(`/v1/auth/oauth/${provider}/start`), window.location.origin);
+    // The callback returns a short-lived exchange code to the same web origin.
+    // Keeping this target explicit prevents the API from returning JSON instead
+    // of sending the user back to the SPA after provider authorization.
+    endpoint.searchParams.set("return_to", `${window.location.origin}/`);
+    window.location.assign(endpoint.toString());
+  }
+
+  exchangeOAuth(provider: OAuthProvider, code: string, mfaCode?: string): Promise<TokensResponse> {
+    return request<TokensResponse>(`/v1/auth/oauth/${provider}/exchange`, { method: "POST" }, {
+      body: { code, mfa_code: mfaCode || undefined },
+    });
+  }
+
   refresh(refreshToken: string, options: RequestOptions = {}): Promise<TokensResponse> {
     const body: RefreshRequest = { refresh_token: refreshToken };
     return request<TokensResponse>("/v1/auth/refresh", { method: "POST" }, { ...options, body });
@@ -251,6 +324,37 @@ export class ApiClient {
 
   verifyMFA(code: string, options: AuthenticatedRequestOptions): Promise<MFAStatus> {
     return request<MFAStatus>("/v1/auth/mfa/verify", { method: "POST" }, { ...options, body: { code } });
+  }
+
+  listMCPTools(options: AuthenticatedRequestOptions): Promise<MCPToolsResponse> {
+    return request<MCPToolsResponse>("/v1/mcp/tools", {}, options);
+  }
+
+  callMCPTool(name: string, arguments_: unknown, options: AuthenticatedRequestOptions): Promise<MCPToolCallResponse> {
+    return request<MCPToolCallResponse>("/v1/mcp/tools/call", { method: "POST" }, {
+      ...options,
+      body: { name, arguments: arguments_ },
+    });
+  }
+
+  prepareMCPAction(input: MCPActionRequest, options: AuthenticatedRequestOptions): Promise<MCPAction> {
+    return request<MCPAction>("/v1/mcp/actions", { method: "POST" }, { ...options, body: input });
+  }
+
+  getMCPAction(actionId: string, options: AuthenticatedRequestOptions): Promise<MCPAction> {
+    return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}`, {}, options);
+  }
+
+  confirmMCPAction(actionId: string, options: AuthenticatedRequestOptions): Promise<MCPAction> {
+    return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}/confirm`, { method: "POST" }, { ...options, body: { confirmation: "CONFIRM" } });
+  }
+
+  cancelMCPAction(actionId: string, options: AuthenticatedRequestOptions): Promise<MCPAction> {
+    return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}/cancel`, { method: "POST" }, options);
+  }
+
+  sendChatMessage(message: string, options: AuthenticatedRequestOptions): Promise<ChatResponse> {
+    return request<ChatResponse>("/v1/chat/messages", { method: "POST" }, { ...options, body: { message } });
   }
 
   createAccount(

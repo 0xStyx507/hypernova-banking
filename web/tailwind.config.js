@@ -4,12 +4,13 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: "#10233f",
-        mint: "#8cf0c5",
-        cream: "#f7f5ef",
+        ink: "#24315e",
+        teal: "#16c1b5",
+        blue: "#2d73a5",
+        purple: "#5b20a3",
+        cream: "#f7f9fb",
       },
     },
   },
   plugins: [],
 };
-
