@@ -12,6 +12,12 @@ RUN npm ci --legacy-peer-deps --no-audit --no-fund
 
 COPY . .
 
+RUN addgroup --system expo \
+  && adduser --system --ingroup expo expo \
+  && chown -R expo:expo /app
+
+USER expo
+
 ENV EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0
 
 EXPOSE 8081

@@ -9,6 +9,11 @@ RUN apk add --no-cache ca-certificates netcat-openbsd unzip wget \
   && rm /tmp/tigerbeetle.zip
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+  && addgroup -S tigerbeetle \
+  && adduser -S -G tigerbeetle tigerbeetle \
+  && mkdir -p /data \
+  && chown -R tigerbeetle:tigerbeetle /data /usr/local/bin/entrypoint.sh
 
+USER tigerbeetle
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
