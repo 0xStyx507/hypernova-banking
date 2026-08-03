@@ -14,11 +14,15 @@ COPY . .
 
 RUN addgroup --system expo \
   && adduser --system --ingroup expo expo \
+  && mkdir -p /home/expo \
+  && chown -R expo:expo /home/expo \
   && chown -R expo:expo /app
 
 USER expo
 
 ENV EXPO_DEVTOOLS_LISTEN_ADDRESS=0.0.0.0
+ENV HOME=/home/expo
+ENV EXPO_NO_TELEMETRY=1
 
 EXPOSE 8081
 
