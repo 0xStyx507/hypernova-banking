@@ -30,5 +30,8 @@ func registerAuthRoutes(router chi.Router, service *auth.Service, ledgerService 
 		router.With(ledgerAuthentication(service)).Get("/mfa", handler.mfaStatus)
 		router.With(ledgerAuthentication(service)).Post("/mfa/enroll", handler.mfaEnroll)
 		router.With(ledgerAuthentication(service)).Post("/mfa/verify", handler.mfaVerify)
+		router.With(ledgerAuthentication(service), requireMFA(service)).Put("/profile", handler.updateProfile)
+		router.With(ledgerAuthentication(service)).Get("/mcp-pin", handler.mcpPINStatus)
+		router.With(ledgerAuthentication(service), requireMFA(service)).Post("/mcp-pin", handler.mcpPINSet)
 	})
 }

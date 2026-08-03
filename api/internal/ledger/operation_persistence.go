@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/tigerbeetle/tigerbeetle-go/pkg/types"
+	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 
 	"github.com/hypernova-banking/api/internal/audit"
 )
@@ -44,7 +44,7 @@ func (s *Service) startOperation(ctx context.Context, userID uuid.UUID, key stri
 	}
 	defer tx.Rollback(ctx)
 	operationID := uuid.New()
-	transferID := types.ID().String()
+	transferID := tigerbeetle.ID().String()
 	insertTag, err := tx.Exec(ctx, `
 		INSERT INTO ledger_operations
 		(id, user_id, idempotency_key, request_hash, operation_type, tigerbeetle_transfer_id, debit_account_id, credit_account_id, amount_minor, currency)
@@ -143,8 +143,8 @@ func (s *Service) completeOperation(ctx context.Context, operation operationReco
 	return result, nil
 }
 
-func (s *Service) reconcileExistingTransfer(ctx context.Context, operation operationRecord, expected types.Transfer, metadata RequestMetadata) (OperationView, error) {
-	existing, err := s.client.LookupTransfers([]types.Uint128{expected.ID})
+func (s *Service) reconcileExistingTransfer(ctx context.Context, operation operationRecord, expected tigerbeetle.Transfer, metadata RequestMetadata) (OperationView, error) {
+	existing, err := s.client.LookupTransfers([]tigerbeetle.Uint128{expected.ID})
 	if err != nil || len(existing) != 1 {
 		return s.markOperationUnknown(ctx, operation, metadata)
 	}
@@ -154,7 +154,7 @@ func (s *Service) reconcileExistingTransfer(ctx context.Context, operation opera
 	return s.completeOperation(ctx, operation, metadata)
 }
 
-func sameTransfer(actual, expected types.Transfer) bool {
+func sameTransfer(actual, expected tigerbeetle.Transfer) bool {
 	return actual.ID == expected.ID &&
 		actual.DebitAccountID == expected.DebitAccountID &&
 		actual.CreditAccountID == expected.CreditAccountID &&

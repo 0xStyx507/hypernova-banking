@@ -10,7 +10,7 @@ interface HistoryPaginationProps {
 export function HistoryPagination({ page, hasMore, busy, onPrevious, onNext }: HistoryPaginationProps) {
   return (
     <div className="pagination-controls" aria-label="Paginación del historial">
-      <span>Página {page}</span>
+      <span>Página {page} · 5 movimientos por página</span>
       <div className="flex gap-2">
         <button className="secondary-button" disabled={page <= 1 || busy} onClick={onPrevious} type="button">Anterior</button>
         <button className="secondary-button" disabled={!hasMore || busy} onClick={onNext} type="button">{busy ? "Cargando…" : "Siguiente"}</button>

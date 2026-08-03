@@ -1,0 +1,25 @@
+import { KeyboardAvoidingView, Platform, ScrollView, Text, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { formatMinor } from "../../api";
+import { ChatbotFab } from "./ChatbotFab";
+import { AccountList } from "./AccountList";
+import { HistoryPanel } from "./HistoryPanel";
+import { MobileBottomNav, MobileHeader } from "./MobileHeader";
+import { OperationPanel } from "./OperationPanel";
+import { SettingsPanel } from "./SettingsPanel";
+import { MobileDashboardProps } from "./types";
+
+/** Authenticated mobile workspace. It mirrors the web sections without copying financial rules. */
+export function MobileDashboard(props: MobileDashboardProps) {
+  return <SafeAreaView className="flex-1 bg-[#f7f9fb] dark:bg-[#0d1726]" edges={["top"]}><KeyboardAvoidingView className="flex-1" behavior={Platform.OS === "ios" ? "padding" : undefined}><View className="flex-1"><MobileHeader name={props.user.full_name} email={props.user.email} onLogout={props.onLogout} /><ScrollView className="flex-1" contentContainerStyle={{ padding: 16, paddingBottom: 150 }} keyboardShouldPersistTaps="handled">
+    {props.section === "accounts" ? <HomeSection {...props} /> : null}
+    {props.section === "history" ? <HistoryPanel history={props.history} page={props.historyPage} busy={props.historyBusy} onPrevious={props.onPreviousHistory} onNext={props.onNextHistory} /> : null}
+    {props.section === "operations" ? <OperationPanel accounts={props.accounts} activeAccount={props.activeAccount} mode={props.operationMode} amount={props.operationAmount} destination={props.destinationAccountId} transferTargetType={props.transferTargetType} transferConfirmationPin={props.transferConfirmationPin} mcpPinConfigured={props.mcpPinConfigured} mcpActionPending={props.mcpActionPending} busy={props.operationBusy} notice={props.notice} onMode={props.onOperationModeChange} onAmount={props.onAmountChange} onDestination={props.onDestinationChange} onTransferTargetTypeChange={props.onTransferTargetTypeChange} onTransferConfirmationPinChange={props.onTransferConfirmationPinChange} onAccount={props.onAccountChange} onSubmit={props.onOperation} /> : null}
+    {props.section === "settings" ? <SettingsPanel user={props.user} name={props.profileFullName} busy={props.profileBusy} notice={props.profileNotice} onName={props.onProfileNameChange} onSave={props.onProfileSubmit} mcpPin={props.mcpPin} mcpPinConfigured={props.mcpPinConfigured} mcpPinBusy={props.mcpPinBusy} mcpPinNotice={props.mcpPinNotice} onMCPPINChange={props.onMCPPINChange} onSetMCPPIN={props.onSetMCPPIN} themeMode={props.themeMode} onThemeModeChange={props.onThemeModeChange} /> : null}
+  </ScrollView><MobileBottomNav active={props.section} onNavigate={props.onNavigate} /><ChatbotFab accessToken={props.accessToken} accountId={props.activeAccount?.id} accountBalances={props.accountBalances} mcpPinConfigured={props.mcpPinConfigured} initialAction={props.mcpAction} onCreatePin={() => props.onNavigate("settings")} onPendingChange={props.onMCPActionPendingChange} onConfirmed={props.onMCPActionConfirmed} onExpired={props.onMCPActionExpired} /></View></KeyboardAvoidingView></SafeAreaView>;
+}
+
+function HomeSection(props: MobileDashboardProps) {
+  const firstName = props.user.full_name.trim().split(/\s+/)[0] || "ahí";
+  return <View><Text className="text-xs font-bold uppercase tracking-[2px] text-slate-400 dark:text-slate-500">Resumen financiero</Text><Text className="mt-1 text-3xl font-semibold text-[#2d73a5] dark:text-[#7bc7ec]">Hola, {firstName}.</Text><Text className="mt-2 text-sm text-slate-500 dark:text-slate-300">Tu posición y actividad reciente.</Text><View className="mt-5 rounded-3xl bg-[#2d73a5] p-5"><View className="flex-row items-start justify-between"><View><Text className="text-sm text-[#d9f8f4]">Saldo disponible</Text><Text className="mt-3 text-4xl font-semibold text-white">{formatMinor(props.balance?.available_balance ?? "0")}</Text></View><Text className="rounded-full bg-white/15 px-3 py-1 text-xs font-bold text-white">USD</Text></View><Text className="mt-4 text-xs text-[#d9f8f4]">Cuenta seleccionada · fondos protegidos</Text></View><View className="mt-5"><AccountList accounts={props.accounts} accountBalances={props.accountBalances} activeAccount={props.activeAccount} busy={props.accountBusy} renameBusyId={props.accountRenameBusyId} notice={props.accountNotice} onSelect={props.onAccountChange} onCreate={props.onCreateAccount} onRename={props.onRenameAccount} /></View><View className="mt-5 rounded-3xl bg-white p-5 dark:bg-[#142235]"><Text className="text-xs font-bold uppercase tracking-[2px] text-slate-400 dark:text-slate-500">Actividad</Text><Text className="mt-1 text-xl font-semibold text-[#2d73a5] dark:text-[#7bc7ec]">Últimos movimientos</Text>{props.history?.items.slice(0, 5).map((item) => <Text className="mt-3 text-sm text-slate-600 dark:text-slate-200" key={`${item.transfer_id}-${item.created_at}`}>{item.type} · {formatMinor(item.amount)}</Text>)}{!props.history?.items.length ? <Text className="mt-3 text-sm text-slate-500 dark:text-slate-300">Todavía no hay movimientos.</Text> : null}</View></View>;
+}

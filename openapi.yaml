@@ -8,7 +8,7 @@ info:
   description: |
     Contrato HTTP de Hypernova Banking.
 
-    Incluye identidad, sesiones, auditoría, cuentas HNL y movimientos
+    Incluye identidad, sesiones, auditoría, cuentas USD y movimientos
     financieros respaldados por TigerBeetle. Los importes son unidades menores
     enteras serializadas como cadenas para evitar redondeos de punto flotante.
 servers:
@@ -27,7 +27,7 @@ tags:
   - name: MCP
     description: Herramientas autenticadas con preparación y confirmación explícita
   - name: Assistant
-    description: Chat autenticado con proveedor local y herramientas MCP de solo lectura
+    description: Chat autenticado con consultas MCP y preparación explícita de operaciones
 paths:
   /healthz:
     get:
@@ -216,6 +216,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/auth/profile:
+    put:
+      operationId: updateProfile
+      summary: Actualiza el nombre del usuario autenticado
+      description: Requiere una sesión con MFA verificado. El correo se mantiene de solo lectura hasta implementar un flujo de verificación de cambio de email.
+      tags: [Authentication]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Perfil actualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Nombre inválido
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Sesión inválida
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: MFA no verificado en la sesión actual
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Error interno de autenticación
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/auth/oauth/{provider}/start:
     get:
       operationId: startOAuth
@@ -374,10 +419,50 @@ paths:
         '410':
           description: Enrolamiento expirado
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/auth/mcp-pin:
+    get:
+      operationId: getMCPPINStatus
+      summary: Consulta si el usuario tiene un PIN MCP configurado
+      description: Devuelve el estado y vencimiento del PIN; nunca expone el hash ni el PIN.
+      tags: [Authentication]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Estado del PIN MCP
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPPINStatus' } } }
+        '401':
+          description: Sesión inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    post:
+      operationId: setMCPPIN
+      summary: Crea o actualiza el PIN de confirmación MCP
+      description: Requiere una sesión válida con MFA verificado. El PIN debe contener exactamente cuatro dígitos ASCII, se almacena como hash bcrypt y vence en tres minutos; al vencer se limpia de PostgreSQL.
+      tags: [Authentication]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/MCPPINRequest' } } }
+      responses:
+        '200':
+          description: PIN configurado
+          content: { application/json: { schema: { $ref: '#/components/schemas/MCPPINStatus' } } }
+        '400':
+          description: El PIN no contiene exactamente cuatro dígitos
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Sesión inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '403':
+          description: MFA no habilitado o no verificado en la sesión actual
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '503':
+          description: Almacén de identidad no disponible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /api/v1/accounts:
     post:
       operationId: createAccount
-      summary: Crea una cuenta HNL para el usuario autenticado
+      summary: Crea otra cuenta USD para el usuario autenticado
+      description: Cada cuenta pertenece al usuario autenticado y puede seleccionarse como origen de una operación. La identidad recibe una cuenta inicial durante el registro.
       tags: [Ledger]
       security: [{ bearerAuth: [] }]
       requestBody:
@@ -433,6 +518,87 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Account' } } }
         '401':
           description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    delete:
+      operationId: closeAccount
+      summary: Cierra una cuenta propia con saldo cero
+      description: Cierra lógicamente la cuenta y conserva sus referencias de auditoría. El saldo disponible y los movimientos pendientes deben ser cero.
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      responses:
+        '204': { description: Cuenta cerrada }
+        '401':
+          description: Sesión inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: La cuenta conserva saldo o movimientos pendientes
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    patch:
+      operationId: renameAccount
+      summary: Cambia el nombre visible de una cuenta propia
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [display_name]
+              properties:
+                display_name: { type: string, minLength: 2, maxLength: 48 }
+      responses:
+        '200':
+          description: Cuenta actualizada
+          content: { application/json: { schema: { $ref: '#/components/schemas/Account' } } }
+        '400':
+          description: Nombre inválido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Sesión inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente o ajena
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+    put:
+      operationId: renameAccountCompatibility
+      deprecated: true
+      summary: Alias temporal de compatibilidad para renombrar una cuenta
+      description: Usa PATCH como método canónico. PUT se mantiene temporalmente para clientes antiguos.
+      tags: [Ledger]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [display_name]
+              properties:
+                display_name: { type: string, minLength: 2, maxLength: 48 }
+      responses:
+        '200':
+          description: Cuenta actualizada
+          content: { application/json: { schema: { $ref: '#/components/schemas/Account' } } }
+        '400':
+          description: Nombre inválido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Sesión inválida
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
         '404':
           description: Cuenta inexistente o ajena
@@ -529,6 +695,12 @@ paths:
         '403':
           description: Canal de depósito demo deshabilitado
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente, inactiva o no autorizada
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
         '503':
           description: Ledger no disponible
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
@@ -551,10 +723,26 @@ paths:
         '422':
           description: Fondos insuficientes
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta inexistente, inactiva o no autorizada; el código público es account_not_found
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '403':
+          description: MFA no completado o ruta financiera no autorizada
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: Clave de idempotencia reutilizada con otra solicitud
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '503':
+          description: Ledger no disponible
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /api/v1/transfers:
     post:
       operationId: createTransfer
-      summary: Transfiere fondos entre dos cuentas HNL
+      summary: Transfiere fondos entre cuentas propias o externas USD
+      description: transfer_type=own exige ownership en origen y destino; transfer_type=external exige una cuenta destino activa de otro usuario. Ambos flujos requieren Idempotency-Key.
       tags: [Ledger]
       security: [{ bearerAuth: [] }]
       parameters:
@@ -568,6 +756,27 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Operation' } } }
         '422':
           description: Fondos insuficientes o cuenta inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '404':
+          description: Cuenta origen o destino inexistente, inactiva o no autorizada
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: Una transferencia externa requiere un PIN de confirmación vigente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '400':
+          description: Solicitud, moneda, tipo de transferencia o clave de idempotencia inválida
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '403':
+          description: MFA no completado o PIN de transferencia inválido
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '429':
+          description: PIN temporalmente bloqueado por demasiados intentos
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '503':
+          description: Ledger o almacén de PIN no disponible
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /api/v1/mcp/tools:
     get:
@@ -620,6 +829,30 @@ paths:
         '400':
           description: Acción inválida
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+  /api/v1/mcp/actions/pending:
+    get:
+      operationId: getPendingMCPAction
+      summary: Recupera la acción MCP pendiente del usuario
+      description: Devuelve la acción lista o en confirmación después de recargar la aplicación; si no existe devuelve action null.
+      tags: [MCP]
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Acción pendiente o null
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action]
+                properties:
+                  action:
+                    type: object
+                    nullable: true
+                    allOf:
+                      - $ref: '#/components/schemas/MCPAction'
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /api/v1/mcp/actions/{action_id}:
     get:
       operationId: getMCPAction
@@ -639,7 +872,7 @@ paths:
     post:
       operationId: confirmMCPAction
       summary: Confirma y ejecuta una acción financiera
-      description: 'Requiere el cuerpo exacto { confirmation: CONFIRM }. El ID de la acción se reutiliza como clave idempotente.'
+      description: 'Requiere el cuerpo exacto { pin: "1234" } con un PIN previamente configurado. El ID de la acción se reutiliza como clave idempotente.'
       tags: [MCP]
       security: [{ bearerAuth: [] }]
       parameters:
@@ -656,6 +889,21 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
         '409':
           description: Acción no puede confirmarse en su estado actual
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '401':
+          description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '403':
+          description: PIN MCP inválido o MFA no verificado
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '410':
+          description: Acción preparada expirada
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '429':
+          description: PIN MCP bloqueado temporalmente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '503':
+          description: Almacén de PIN o ledger no disponible
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
   /api/v1/mcp/actions/{action_id}/cancel:
     post:
@@ -676,7 +924,7 @@ paths:
     post:
       operationId: sendChatMessage
       summary: Envía un mensaje al asistente bancario
-      description: El proveedor local puede consultar herramientas de solo lectura; las operaciones financieras siempre requieren el flujo MCP de preparación y confirmación.
+      description: El proveedor local es el fallback; OpenRouter puede habilitarse de forma optativa. La salida se valida contra una allowlist y las operaciones financieras siempre requieren el flujo MCP de preparación y confirmación.
       tags: [Assistant]
       security: [{ bearerAuth: [] }]
       requestBody:
@@ -706,6 +954,21 @@ components:
       schema:
         type: string
         enum: [google, github]
+    AccountID:
+      name: account_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    ActionID:
+      name: action_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
     HealthResponse:
       type: object
@@ -828,6 +1091,16 @@ components:
         refresh_token:
           type: string
           description: Token opaco emitido por login o refresh.
+    UpdateProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [full_name]
+      properties:
+        full_name:
+          type: string
+          minLength: 2
+          maxLength: 120
+          description: Nombre visible del usuario. El correo no se modifica por este endpoint.
     User:
       type: object
       required: [id, email, full_name, created_at]
@@ -875,8 +1148,8 @@ components:
       properties:
         currency:
           type: string
-          enum: [HNL]
-          default: HNL
+          enum: [USD]
+          default: USD
     MovementRequest:
       type: object
       additionalProperties: false
@@ -889,8 +1162,8 @@ components:
           example: '125000'
         currency:
           type: string
-          enum: [HNL]
-          default: HNL
+          enum: [USD]
+          default: USD
     TransferRequest:
       allOf:
         - $ref: '#/components/schemas/MovementRequest'
@@ -899,21 +1172,32 @@ components:
           properties:
             source_account_id: { type: string, format: uuid }
             destination_account_id: { type: string, format: uuid }
+            transfer_type:
+              type: string
+              enum: [own, external]
+              default: own
+              description: own exige ownership en ambas cuentas; external exige una cuenta activa de otro usuario.
+            confirmation_pin:
+              type: string
+              pattern: '^[0-9]{4}$'
+              writeOnly: true
+              description: PIN requerido únicamente para transferencias externas.
     Account:
       type: object
-      required: [id, currency, type, status, created_at]
+      required: [id, display_name, currency, type, status, created_at]
       properties:
         id: { type: string, format: uuid }
-        currency: { type: string, enum: [HNL] }
+        display_name: { type: string, maxLength: 48 }
+        currency: { type: string, enum: [USD] }
         type: { type: string, enum: [checking] }
-        status: { type: string, enum: [provisioning, active, failed] }
+        status: { type: string, enum: [provisioning, active, failed, closed] }
         created_at: { type: string, format: date-time }
     Balance:
       type: object
       required: [account_id, currency, balance, available_balance, credits_posted, debits_posted, credits_pending, debits_pending]
       properties:
         account_id: { type: string, format: uuid }
-        currency: { type: string, enum: [HNL] }
+        currency: { type: string, enum: [USD] }
         balance: { type: string, pattern: '^[0-9]+$' }
         available_balance: { type: string, pattern: '^[0-9]+$' }
         credits_posted: { type: string, pattern: '^[0-9]+$' }
@@ -929,7 +1213,7 @@ components:
         status: { type: string, enum: [succeeded] }
         transfer_id: { type: string }
         amount: { type: string, pattern: '^[1-9][0-9]*$' }
-        currency: { type: string, enum: [HNL] }
+        currency: { type: string, enum: [USD] }
         created_at: { type: string, format: date-time }
     Transaction:
       type: object
@@ -939,7 +1223,7 @@ components:
         type: { type: string, enum: [deposit, withdrawal, transfer] }
         direction: { type: string, enum: [credit, debit] }
         amount: { type: string, pattern: '^[1-9][0-9]*$' }
-        currency: { type: string, enum: [HNL] }
+        currency: { type: string, enum: [USD] }
         created_at: { type: string, format: date-time }
     HistoryResponse:
       type: object
@@ -974,15 +1258,32 @@ components:
         account_id: { type: string, format: uuid }
         source_account_id: { type: string, format: uuid }
         destination_account_id: { type: string, format: uuid }
+        transfer_type:
+          type: string
+          enum: [own, external]
+          default: own
+          description: Alcance explícito de la transferencia; el valor omitido se interpreta como own.
         amount: { type: string, pattern: '^[1-9][0-9]*$' }
-        currency: { type: string, enum: [HNL], default: HNL }
+        currency: { type: string, enum: [USD], default: USD }
         reason: { type: string, maxLength: 280 }
     MCPConfirmationRequest:
       type: object
       additionalProperties: false
-      required: [confirmation]
+      required: [pin]
       properties:
-        confirmation: { type: string, enum: [CONFIRM] }
+        pin: { type: string, pattern: '^[0-9]{4}$', description: PIN MCP de exactamente cuatro dígitos ASCII }
+    MCPPINRequest:
+      type: object
+      additionalProperties: false
+      required: [pin]
+      properties:
+        pin: { type: string, pattern: '^[0-9]{4}$', description: PIN MCP de exactamente cuatro dígitos ASCII }
+    MCPPINStatus:
+      type: object
+      required: [configured]
+      properties:
+        configured: { type: boolean, description: Indica si existe un PIN vigente para el usuario }
+        expires_at: { type: string, format: date-time, description: Hora de vencimiento del PIN vigente }
     MCPToolCallRequest:
       type: object
       additionalProperties: false
@@ -991,7 +1292,12 @@ components:
         name: { type: string, example: get_accounts }
         arguments:
           type: object
-          additionalProperties: true
+          description: Para get_transactions se aceptan account_id, limit (1..100) y cursor. Para get_balance solo account_id.
+          properties:
+            account_id: { type: string, format: uuid }
+            limit: { type: integer, minimum: 1, maximum: 100, default: 50 }
+            cursor: { type: string, description: Cursor opaco devuelto por la página anterior }
+          additionalProperties: false
     MCPToolCallResponse:
       type: object
       required: [name, result]
@@ -1004,6 +1310,9 @@ components:
       required: [message]
       properties:
         message: { type: string, minLength: 1, maxLength: 2000 }
+        account_id: { type: string, format: uuid, description: Cuenta activa seleccionada para contextualizar la consulta. }
+        conversation:
+          $ref: '#/components/schemas/ChatConversation'
     ChatResponse:
       type: object
       required: [message, requires_confirmation]
@@ -1011,6 +1320,32 @@ components:
         message: { type: string }
         requires_confirmation: { type: boolean }
         read_only_data: {}
+        action: { $ref: '#/components/schemas/MCPAction' }
+        conversation: { $ref: '#/components/schemas/ChatConversation' }
+        account_options:
+          type: array
+          description: Cuentas activas disponibles para completar una operación pendiente.
+          items: { $ref: '#/components/schemas/ChatAccountOption' }
+    ChatAccountOption:
+      type: object
+      required: [id, display_name, currency]
+      properties:
+        id: { type: string, format: uuid }
+        display_name: { type: string }
+        currency: { type: string, enum: [USD] }
+    ChatConversation:
+      type: object
+      description: Intención incompleta que el cliente devuelve en el siguiente mensaje; no autoriza ni ejecuta fondos.
+      properties:
+        action: { type: string, enum: [deposit, withdrawal, transfer] }
+        account_id: { type: string, format: uuid }
+        source_account_id: { type: string, format: uuid }
+        destination_account_id: { type: string, format: uuid }
+        transfer_type: { type: string, enum: [own, external] }
+        amount: { type: string, pattern: '^[1-9][0-9]*$' }
+        account_options:
+          type: array
+          items: { $ref: '#/components/schemas/ChatAccountOption' }
     MCPAction:
       type: object
       required: [id, action, status, payload, expires_at, created_at]
@@ -1023,19 +1358,3 @@ components:
         created_at: { type: string, format: date-time }
         confirmed_at: { type: string, format: date-time }
         operation: { $ref: '#/components/schemas/Operation' }
-  parameters:
-    AccountID:
-      name: account_id
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
-    IdempotencyKey:
-      name: Idempotency-Key
-      in: header
-      required: true
-      schema: { type: string, minLength: 1, maxLength: 128 }
-    ActionID:
-      name: action_id
-      in: path
-      required: true
-      schema: { type: string, format: uuid }

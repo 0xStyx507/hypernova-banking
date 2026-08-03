@@ -6,8 +6,8 @@
  * token persistence and session policy in one application-level boundary.
  */
 
-export type Currency = "HNL";
-export type AccountStatus = "provisioning" | "active" | "failed";
+export type Currency = "USD";
+export type AccountStatus = "provisioning" | "active" | "failed" | "closed";
 export type OperationType = "deposit" | "withdrawal" | "transfer";
 export type OperationStatus = "succeeded";
 export type TransactionDirection = "credit" | "debit";
@@ -21,6 +21,7 @@ export interface User {
 
 export interface Account {
   id: string;
+  display_name: string;
   currency: Currency;
   type: "checking";
   status: AccountStatus;
@@ -99,6 +100,9 @@ export interface MovementRequest {
 export interface TransferRequest extends MovementRequest {
   source_account_id: string;
   destination_account_id: string;
+  transfer_type?: "own" | "external";
+  /** Required by the API only when the destination is not owned by the user. */
+  confirmation_pin?: string;
 }
 
 export interface RegistrationResponse {
@@ -134,6 +138,15 @@ export interface MCPToolsResponse {
   tools: MCPTool[];
 }
 
+export interface UpdateProfileRequest {
+  full_name: string;
+}
+
+export interface MCPPINStatus {
+  configured: boolean;
+  expires_at?: string;
+}
+
 export interface MCPToolCallResponse {
   name: string;
   result: unknown;
@@ -146,6 +159,7 @@ export interface MCPActionRequest {
   account_id?: string;
   source_account_id?: string;
   destination_account_id?: string;
+  transfer_type?: "own" | "external";
   /** Integer minor units encoded as a decimal string. */
   amount: string;
   currency: Currency;
@@ -157,7 +171,7 @@ export type MCPActionPayload = MCPActionRequest;
 export interface MCPAction {
   id: string;
   action: MCPActionType;
-  status: "ready" | "confirming" | "confirmed" | "cancelled" | "expired";
+  status: "ready" | "confirming" | "confirmed" | "cancelled" | "expired" | "failed";
   payload: MCPActionPayload;
   expires_at: string;
   created_at: string;
@@ -169,6 +183,25 @@ export interface ChatResponse {
   message: string;
   requires_confirmation: boolean;
   read_only_data?: unknown;
+  action?: MCPAction;
+  conversation?: MCPConversationState;
+  account_options?: MCPAccountOption[];
+}
+
+export interface MCPAccountOption {
+  id: string;
+  display_name: string;
+  currency: Currency;
+}
+
+export interface MCPConversationState {
+  action?: MCPActionType;
+  account_id?: string;
+  source_account_id?: string;
+  destination_account_id?: string;
+  transfer_type?: "own" | "external";
+  amount?: string;
+  account_options?: MCPAccountOption[];
 }
 
 export interface Operation {
@@ -280,7 +313,7 @@ async function request<T>(path: string, init: RequestInit = {}, config: RequestC
 }
 
 export class ApiClient {
-  /** Registers identity and the default HNL account in one API response. */
+  /** Registers identity and the default USD account in one API response. */
   register(input: RegisterRequest, options: RequestOptions = {}): Promise<RegistrationResponse> {
     return request<RegistrationResponse>("/v1/auth/register", { method: "POST" }, { ...options, body: input });
   }
@@ -344,17 +377,34 @@ export class ApiClient {
   getMCPAction(actionId: string, options: AuthenticatedRequestOptions): Promise<MCPAction> {
     return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}`, {}, options);
   }
+  getPendingMCPAction(options: AuthenticatedRequestOptions): Promise<{ action: MCPAction | null }> {
+    return request<{ action: MCPAction | null }>("/v1/mcp/actions/pending", {}, options);
+  }
 
-  confirmMCPAction(actionId: string, options: AuthenticatedRequestOptions): Promise<MCPAction> {
-    return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}/confirm`, { method: "POST" }, { ...options, body: { confirmation: "CONFIRM" } });
+  confirmMCPAction(actionId: string, pin: string, options: AuthenticatedRequestOptions): Promise<MCPAction> {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
+    return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}/confirm`, { method: "POST" }, { ...options, body: { pin }, signal: controller.signal }).finally(() => window.clearTimeout(timeout));
+  }
+
+  updateProfile(input: UpdateProfileRequest, options: AuthenticatedRequestOptions): Promise<User> {
+    return request<User>("/v1/auth/profile", { method: "PUT" }, { ...options, body: input });
   }
 
   cancelMCPAction(actionId: string, options: AuthenticatedRequestOptions): Promise<MCPAction> {
     return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}/cancel`, { method: "POST" }, options);
   }
 
-  sendChatMessage(message: string, options: AuthenticatedRequestOptions): Promise<ChatResponse> {
-    return request<ChatResponse>("/v1/chat/messages", { method: "POST" }, { ...options, body: { message } });
+  getMCPPINStatus(options: AuthenticatedRequestOptions): Promise<MCPPINStatus> {
+    return request<MCPPINStatus>("/v1/auth/mcp-pin", {}, options);
+  }
+
+  setMCPPIN(pin: string, options: AuthenticatedRequestOptions): Promise<MCPPINStatus> {
+    return request<MCPPINStatus>("/v1/auth/mcp-pin", { method: "POST" }, { ...options, body: { pin } });
+  }
+
+  sendChatMessage(message: string, accountId: string | undefined, conversation: MCPConversationState | null, options: AuthenticatedRequestOptions): Promise<ChatResponse> {
+    return request<ChatResponse>("/v1/chat/messages", { method: "POST" }, { ...options, body: { message, account_id: accountId, conversation: conversation ?? undefined } });
   }
 
   createAccount(
@@ -370,6 +420,14 @@ export class ApiClient {
 
   getAccount(accountId: string, options: AuthenticatedRequestOptions): Promise<Account> {
     return request<Account>(`/v1/accounts/${encodeURIComponent(accountId)}`, {}, options);
+  }
+
+  renameAccount(accountId: string, displayName: string, options: AuthenticatedRequestOptions): Promise<Account> {
+    return request<Account>(`/v1/accounts/${encodeURIComponent(accountId)}`, { method: "PATCH" }, { ...options, body: { display_name: displayName } });
+  }
+
+  closeAccount(accountId: string, options: AuthenticatedRequestOptions): Promise<void> {
+    return request<void>(`/v1/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }, options);
   }
 
   getBalance(accountId: string, options: AuthenticatedRequestOptions): Promise<Balance> {

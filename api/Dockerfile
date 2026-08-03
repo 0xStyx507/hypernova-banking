@@ -2,7 +2,7 @@ FROM golang:1.24-alpine AS build
 
 WORKDIR /src
 RUN apk add --no-cache gcc musl-dev
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
 

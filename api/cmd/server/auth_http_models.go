@@ -28,6 +28,10 @@ type refreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+type updateProfileRequest struct {
+	FullName string `json:"full_name"`
+}
+
 type oauthExchangeRequest struct {
 	Code    string `json:"code"`
 	MFACode string `json:"mfa_code,omitempty"`

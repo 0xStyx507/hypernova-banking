@@ -11,7 +11,7 @@ import (
 	"net/mail"
 	"strings"
 	"time"
-	"unicode/utf8"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -64,6 +64,12 @@ type RequestMetadata struct {
 type RegisterInput struct {
 	Email    string
 	Password string
+	FullName string
+}
+
+// UpdateProfileInput contains the profile fields that can be changed without
+// an email-verification workflow. Email remains immutable in this endpoint.
+type UpdateProfileInput struct {
 	FullName string
 }
 
@@ -125,7 +131,7 @@ func ValidateRegistration(input RegisterInput) (RegisterInput, error) {
 	if err != nil || parsedEmail.Address != input.Email || len(input.Email) > 320 {
 		return RegisterInput{}, ErrInvalidInput
 	}
-	if utf8.RuneCountInString(input.FullName) < 2 || utf8.RuneCountInString(input.FullName) > 120 {
+	if !validFullName(input.FullName) {
 		return RegisterInput{}, ErrInvalidInput
 	}
 	if len([]byte(input.Password)) < 8 || len([]byte(input.Password)) > maxPasswordBytes {
@@ -201,6 +207,58 @@ func (s *Service) Register(ctx context.Context, input RegisterInput, metadata Re
 		return User{}, fmt.Errorf("commit registration: %w", err)
 	}
 	return user, nil
+}
+
+// UpdateProfile changes the authenticated user's safe personal fields and
+// records the change for auditability.
+func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input UpdateProfileInput, metadata RequestMetadata) (User, error) {
+	if s == nil || s.pool == nil || userID == uuid.Nil {
+		return User{}, ErrInvalidInput
+	}
+	input.FullName = strings.TrimSpace(input.FullName)
+	if !validFullName(input.FullName) {
+		return User{}, ErrInvalidInput
+	}
+	var user User
+	err := s.pool.QueryRow(ctx, `
+		UPDATE users SET full_name = $1, updated_at = NOW()
+		WHERE id = $2 AND active
+		RETURNING id, email, full_name, created_at
+	`, input.FullName, userID).Scan(&user.ID, &user.Email, &user.FullName, &user.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return User{}, ErrInvalidInput
+		}
+		return User{}, fmt.Errorf("update profile: %w", err)
+	}
+	if err := recordAudit(ctx, s.pool, &userID, "profile_updated", map[string]any{"fields": []string{"full_name"}}, metadata); err != nil {
+		return User{}, fmt.Errorf("audit profile update: %w", err)
+	}
+	return user, nil
+}
+
+// validFullName accepts international letters and combining accent marks,
+// while rejecting punctuation, symbols and control characters. This keeps
+// names such as "María José" and "Ñusta" valid without allowing log/header
+// injection through newlines or unexpected delimiters.
+func validFullName(value string) bool {
+	runes := []rune(value)
+	if len(runes) < 2 || len(runes) > 120 {
+		return false
+	}
+	hasLetter := false
+	for _, character := range runes {
+		switch {
+		case unicode.IsLetter(character):
+			hasLetter = true
+		case unicode.Is(unicode.Mn, character):
+			// Permit decomposed accents such as e + combining acute mark.
+		case character == ' ':
+		default:
+			return false
+		}
+	}
+	return hasLetter
 }
 
 // Login preserves the original password-only service contract for callers

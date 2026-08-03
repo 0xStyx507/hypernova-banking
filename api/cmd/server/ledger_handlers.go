@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -22,6 +23,10 @@ type accountRequest struct {
 	Currency string `json:"currency"`
 }
 
+type accountRenameRequest struct {
+	DisplayName string `json:"display_name"`
+}
+
 type movementRequest struct {
 	Amount   string `json:"amount"`
 	Currency string `json:"currency"`
@@ -30,6 +35,8 @@ type movementRequest struct {
 type transferRequest struct {
 	SourceAccountID      string `json:"source_account_id"`
 	DestinationAccountID string `json:"destination_account_id"`
+	TransferType         string `json:"transfer_type"`
+	ConfirmationPIN      string `json:"confirmation_pin"`
 	Amount               string `json:"amount"`
 	Currency             string `json:"currency"`
 }
@@ -43,12 +50,17 @@ type historyResponse struct {
 // registerLedgerRoutes adds authenticated financial routes only when the
 // ledger dependency was initialized successfully during application startup.
 func registerLedgerRoutes(router chi.Router, authService *auth.Service, service *ledger.Service) {
-	handler := ledgerHandler{service: service}
+	handler := ledgerHandler{auth: authService, service: service}
 	router.Route("/api/v1", func(router chi.Router) {
 		router.Use(ledgerAuthentication(authService), requireMFA(authService))
 		router.Post("/accounts", handler.createAccount)
 		router.Get("/accounts", handler.listAccounts)
 		router.Get("/accounts/{account_id}", handler.getAccount)
+		router.Patch("/accounts/{account_id}", handler.renameAccount)
+		// PUT remains a compatibility alias for clients deployed before the
+		// account rename contract was corrected to PATCH.
+		router.Put("/accounts/{account_id}", handler.renameAccount)
+		router.Delete("/accounts/{account_id}", handler.deleteAccount)
 		router.Get("/accounts/{account_id}/balance", handler.getBalance)
 		router.Get("/accounts/{account_id}/transactions", handler.getHistory)
 		router.Get("/accounts/{account_id}/transactions.csv", handler.exportHistory)
@@ -111,13 +123,19 @@ func ledgerAuthentication(service *auth.Service) func(http.Handler) http.Handler
 	}
 }
 
-type ledgerHandler struct{ service *ledger.Service }
+type ledgerHandler struct {
+	auth    *auth.Service
+	service *ledger.Service
+}
 
 func (h ledgerHandler) createAccount(w http.ResponseWriter, r *http.Request) {
 	var request accountRequest
-	if err := decodeJSON(w, r, &request); err != nil {
+	if err := decodeJSON(w, r, &request); err != nil && !errors.Is(err, io.EOF) {
 		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "invalid request")
 		return
+	}
+	if strings.TrimSpace(request.Currency) == "" {
+		request.Currency = "USD"
 	}
 	view, err := h.service.CreateAccount(r.Context(), authenticatedUser(r), request.Currency)
 	if err != nil {
@@ -143,6 +161,31 @@ func (h ledgerHandler) getAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, account)
+}
+
+func (h ledgerHandler) renameAccount(w http.ResponseWriter, r *http.Request) {
+	var request accountRenameRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "invalid account name")
+		return
+	}
+	view, err := h.service.RenameAccount(r.Context(), authenticatedUser(r), chi.URLParam(r, "account_id"), request.DisplayName, requestMetadataForLedger(r))
+	if err != nil {
+		writeLedgerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+// deleteAccount closes an account only after the ledger confirms that it has
+// no available or pending funds. The TigerBeetle account remains immutable;
+// PostgreSQL marks it closed so its audit history is never physically erased.
+func (h ledgerHandler) deleteAccount(w http.ResponseWriter, r *http.Request) {
+	if err := h.service.CloseAccount(r.Context(), authenticatedUser(r), chi.URLParam(r, "account_id"), requestMetadataForLedger(r)); err != nil {
+		writeLedgerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h ledgerHandler) getBalance(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +262,7 @@ func (h ledgerHandler) deposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validCurrency(request.Currency) {
-		writeErrorCode(w, http.StatusBadRequest, "invalid_currency", "only HNL is supported")
+		writeErrorCode(w, http.StatusBadRequest, "invalid_currency", "only USD is supported")
 		return
 	}
 	view, err := h.service.Deposit(r.Context(), authenticatedUser(r), chi.URLParam(r, "account_id"), request.Amount, idempotencyKey(r), requestMetadataForLedger(r))
@@ -236,7 +279,7 @@ func (h ledgerHandler) withdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validCurrency(request.Currency) {
-		writeErrorCode(w, http.StatusBadRequest, "invalid_currency", "only HNL is supported")
+		writeErrorCode(w, http.StatusBadRequest, "invalid_currency", "only USD is supported")
 		return
 	}
 	view, err := h.service.Withdraw(r.Context(), authenticatedUser(r), chi.URLParam(r, "account_id"), request.Amount, idempotencyKey(r), requestMetadataForLedger(r))
@@ -254,14 +297,37 @@ func (h ledgerHandler) transfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !validCurrency(request.Currency) {
-		writeErrorCode(w, http.StatusBadRequest, "invalid_currency", "only HNL is supported")
+		writeErrorCode(w, http.StatusBadRequest, "invalid_currency", "only USD is supported")
 		return
 	}
 	if idempotencyKey(r) == "" {
 		writeErrorCode(w, http.StatusBadRequest, "missing_idempotency_key", "Idempotency-Key is required")
 		return
 	}
-	view, err := h.service.Transfer(r.Context(), authenticatedUser(r), request.SourceAccountID, request.DestinationAccountID, request.Amount, idempotencyKey(r), requestMetadataForLedger(r))
+	scope, err := ledger.NormalizeTransferScope(request.TransferType)
+	if err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_transfer_type", "transfer_type must be own or external")
+		return
+	}
+	if err := h.service.ValidateTransferTarget(r.Context(), authenticatedUser(r), request.SourceAccountID, request.DestinationAccountID, string(scope)); err != nil {
+		writeLedgerError(w, err)
+		return
+	}
+	if scope == ledger.TransferScopeExternal {
+		if strings.TrimSpace(request.ConfirmationPIN) == "" {
+			writeErrorCode(w, http.StatusConflict, "external_transfer_pin_required", "a confirmation PIN is required for external transfers")
+			return
+		}
+		if h.auth == nil {
+			writeErrorCode(w, http.StatusServiceUnavailable, "mcp_pin_unavailable", "MCP PIN is unavailable")
+			return
+		}
+		if err := h.auth.VerifyMCPPIN(r.Context(), authenticatedUser(r), request.ConfirmationPIN, requestMetadata(r)); err != nil {
+			writeMCPError(w, err)
+			return
+		}
+	}
+	view, err := h.service.TransferWithScope(r.Context(), authenticatedUser(r), request.SourceAccountID, request.DestinationAccountID, request.Amount, idempotencyKey(r), string(scope), requestMetadataForLedger(r))
 	if err != nil {
 		writeLedgerError(w, err)
 		return
@@ -292,7 +358,7 @@ func idempotencyKey(r *http.Request) string {
 
 func validCurrency(value string) bool {
 	value = strings.TrimSpace(value)
-	return value == "" || strings.EqualFold(value, "HNL")
+	return value == "" || strings.EqualFold(value, "USD")
 }
 
 func requestMetadataForLedger(r *http.Request) ledger.RequestMetadata {
@@ -317,6 +383,8 @@ func writeLedgerError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusUnprocessableEntity, "ledger_rejected", "financial operation rejected")
 	case errors.Is(err, ledger.ErrConflict):
 		writeErrorCode(w, http.StatusConflict, "operation_in_progress", "operation conflicts with existing state")
+	case errors.Is(err, ledger.ErrAccountNotEmpty):
+		writeErrorCode(w, http.StatusConflict, "account_not_empty", "the account must have a zero USD balance before it can be closed")
 	default:
 		writeErrorCode(w, http.StatusInternalServerError, "internal_error", "financial operation failed")
 	}

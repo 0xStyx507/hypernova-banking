@@ -8,13 +8,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/tigerbeetle/tigerbeetle-go/pkg/types"
+	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 )
 
 const (
-	defaultCurrency = "HNL"
+	defaultCurrency = "USD"
 	ledgerCode      = uint32(1)
 	transferCode    = uint16(1)
 	maxHistory      = uint32(100)
@@ -29,16 +30,40 @@ var (
 	ErrLedgerUnavailable   = errors.New("ledger unavailable")
 	ErrLedgerRejected      = errors.New("ledger rejected operation")
 	ErrIdempotencyConflict = errors.New("idempotency key reused with different request")
+	ErrAccountNotEmpty     = errors.New("account balance must be zero before closing")
 )
+
+// TransferScope makes the destination rule explicit at the domain boundary.
+// Own transfers require both accounts to belong to the authenticated user;
+// external transfers require an active account owned by another user.
+type TransferScope string
+
+const (
+	TransferScopeOwn      TransferScope = "own"
+	TransferScopeExternal TransferScope = "external"
+)
+
+// NormalizeTransferScope applies the secure default for older clients that do
+// not yet send the explicit transfer_type field.
+func NormalizeTransferScope(value string) (TransferScope, error) {
+	scope := TransferScope(strings.ToLower(strings.TrimSpace(value)))
+	if scope == "" {
+		return TransferScopeOwn, nil
+	}
+	if scope != TransferScopeOwn && scope != TransferScopeExternal {
+		return "", ErrInvalidInput
+	}
+	return scope, nil
+}
 
 // Client is the small TigerBeetle surface used by this service. Keeping it
 // local makes domain tests independent from a running ledger process.
 type Client interface {
-	CreateAccounts([]types.Account) ([]types.AccountEventResult, error)
-	CreateTransfers([]types.Transfer) ([]types.TransferEventResult, error)
-	LookupAccounts([]types.Uint128) ([]types.Account, error)
-	LookupTransfers([]types.Uint128) ([]types.Transfer, error)
-	GetAccountTransfers(types.AccountFilter) ([]types.Transfer, error)
+	CreateAccounts([]tigerbeetle.Account) ([]tigerbeetle.CreateAccountResult, error)
+	CreateTransfers([]tigerbeetle.Transfer) ([]tigerbeetle.CreateTransferResult, error)
+	LookupAccounts([]tigerbeetle.Uint128) ([]tigerbeetle.Account, error)
+	LookupTransfers([]tigerbeetle.Uint128) ([]tigerbeetle.Transfer, error)
+	GetAccountTransfers(tigerbeetle.AccountFilter) ([]tigerbeetle.Transfer, error)
 	Nop() error
 }
 
@@ -65,7 +90,7 @@ type Config struct {
 	AllowDemoDeposits bool
 }
 
-// NewService creates a ledger service for the supported HNL account model.
+// NewService creates a ledger service for the supported USD account model.
 func NewService(pool *pgxpool.Pool, client Client, configs ...Config) *Service {
 	config := Config{}
 	if len(configs) > 0 {

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/tigerbeetle/tigerbeetle-go/pkg/types"
+	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 )
 
 func normalizeCurrency(value string) (string, error) {
@@ -41,34 +41,38 @@ func parseMinorAmount(value string) (int64, error) {
 	return int64(parsed), nil
 }
 
-func hashRequest(operationType string, debit, credit types.Uint128, amount int64, currency string) []byte {
-	value := fmt.Sprintf("%s|%s|%s|%d|%s", operationType, debit.String(), credit.String(), amount, currency)
+func hashRequest(operationType string, debit, credit tigerbeetle.Uint128, amount int64, currency string) []byte {
+	return hashRequestWithScope(operationType, debit, credit, amount, currency, "")
+}
+
+func hashRequestWithScope(operationType string, debit, credit tigerbeetle.Uint128, amount int64, currency, scope string) []byte {
+	value := fmt.Sprintf("%s|%s|%s|%d|%s|%s", operationType, debit.String(), credit.String(), amount, currency, scope)
 	hash := sha256.Sum256([]byte(value))
 	return hash[:]
 }
 
-func uint128String(value types.Uint128) string {
+func uint128String(value tigerbeetle.Uint128) string {
 	parsed := value.BigInt()
 	return parsed.String()
 }
 
-func uuidToTigerID(id uuid.UUID) types.Uint128 {
+func uuidToTigerID(id uuid.UUID) tigerbeetle.Uint128 {
 	var bytesValue [16]byte
 	copy(bytesValue[:], id[:])
-	return types.BytesToUint128(bytesValue)
+	return tigerbeetle.BytesToUint128(bytesValue)
 }
 
-func systemAccountID(currency string) types.Uint128 {
+func systemAccountID(currency string) tigerbeetle.Uint128 {
 	// A fixed namespace keeps development system accounts stable without
 	// overlapping normal UUID-v4 account identifiers in practice.
 	if currency == defaultCurrency {
-		return types.ToUint128(0x1000000000000001)
+		return tigerbeetle.ToUint128(0x1000000000000001)
 	}
-	return types.ToUint128(0x1000000000000002)
+	return tigerbeetle.ToUint128(0x1000000000000002)
 }
 
-func mustTigerID(value string) types.Uint128 {
-	parsed, err := types.HexStringToUint128(value)
+func mustTigerID(value string) tigerbeetle.Uint128 {
+	parsed, err := tigerbeetle.HexStringToUint128(value)
 	if err != nil {
 		panic("invalid persisted TigerBeetle identifier: " + hex.EncodeToString([]byte(value)))
 	}

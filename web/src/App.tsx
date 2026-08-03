@@ -1,12 +1,17 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Account, ApiError, Balance, HistoryResponse, MFAEnrollment, MFAStatus, MCPAction, MCPActionRequest, MCPTool, OAuthProvider, Operation, apiClient } from "./api";
+import { Account, ApiError, Balance, HistoryResponse, MFAEnrollment, MFAStatus, MCPAction, MCPActionRequest, MCPAccountOption, MCPConversationState, OAuthProvider, Operation, apiClient } from "./api";
 import { AuthPage } from "./features/auth/AuthPage";
 import { MFAOnboarding } from "./features/auth/MFAOnboarding";
 import { MFAStatusLoading } from "./features/auth/MFAStatusLoading";
 import { MFAVerificationPage } from "./features/auth/MFAVerificationPage";
 import { DashboardPage } from "./features/dashboard/DashboardPage";
-import { AuthField, AuthFieldErrors, AuthForm, AuthMode, FormNotice, OAuthPending, OperationMode, Session } from "./types";
+import { AssistantReply, AuthField, AuthFieldErrors, AuthForm, AuthMode, FormNotice, OAuthPending, OperationMode, Session, TransferTargetType } from "./types";
 import { clearStoredSession, readStoredSession, storeSession } from "./session";
+import { readThemeMode, resolveTheme } from "./theme";
+import type { ThemeMode } from "./theme";
+import { currencyInputToMinor } from "./money";
+
+const HISTORY_PAGE_SIZE = 5;
 
 function formatMinorAmount(value: string): string {
   try {
@@ -15,9 +20,9 @@ function formatMinorAmount(value: string): string {
     const absolute = negative ? -minor : minor;
     const digits = absolute.toString().padStart(3, "0");
     const whole = digits.slice(0, -2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    return `${negative ? "-" : ""}HNL ${whole}.${digits.slice(-2)}`;
+    return `${negative ? "-" : ""}USD ${whole}.${digits.slice(-2)}`;
   } catch {
-    return "HNL 0.00";
+    return "USD 0.00";
   }
 }
 
@@ -25,8 +30,10 @@ function displayError(error: unknown): string {
   if (error instanceof ApiError) {
     const messages: Record<string, string> = {
       invalid_registration: "Revisa los datos: el nombre, correo o contraseña no cumplen los requisitos.",
+      invalid_profile: "Revisa tu nombre e inténtalo nuevamente.",
       invalid_login: "Revisa tu correo y contraseña antes de intentar nuevamente.",
       invalid_request: "No pudimos leer los datos. Revisa los campos e inténtalo otra vez.",
+      invalid_currency: "La cuenta debe crearse en USD. Actualiza la aplicación y vuelve a intentarlo.",
       email_already_in_use: "Ese correo ya tiene una cuenta. Prueba iniciar sesión.",
       invalid_credentials: "El correo o la contraseña no coinciden.",
       invalid_access_token: "Tu sesión expiró. Inicia sesión nuevamente.",
@@ -37,10 +44,22 @@ function displayError(error: unknown): string {
       mfa_invalid_code: "El código MFA no es válido o ya expiró. Revisa tu autenticador.",
       mfa_enrollment_expired: "El enrolamiento MFA expiró. Genera un QR nuevo.",
       mfa_already_enabled: "El MFA ya está activo para esta cuenta.",
+      invalid_mcp_pin: "El PIN debe tener exactamente cuatro dígitos y coincidir con el configurado.",
+      mcp_pin_not_configured: "Configura tu PIN de cuatro dígitos antes de confirmar una operación.",
+      mcp_pin_expired: "Tu PIN de confirmación venció. Genera uno nuevo para continuar.",
+      mcp_pin_locked: "El PIN quedó bloqueado temporalmente por varios intentos. Espera unos minutos antes de volver a intentarlo.",
+      mcp_pin_unavailable: "No pudimos consultar tu PIN de confirmación. Inténtalo nuevamente.",
+      mcp_pin_error: "No pudimos guardar tu PIN de confirmación. Inténtalo nuevamente.",
       oauth_not_configured: "Este proveedor todavía no está configurado en el entorno.",
       oauth_invalid_redirect: "El retorno OAuth no está permitido por la configuración del servidor.",
       oauth_email_conflict: "Ese email ya pertenece a una cuenta vinculada. Inicia sesión y vincula el proveedor desde seguridad.",
       idempotency_key_reused: "La operación ya existe con otra solicitud.",
+      account_not_found: "La cuenta seleccionada no está disponible. Actualiza tus cuentas e inténtalo nuevamente.",
+      external_account_required: "La cuenta destino no está disponible para transferir.",
+      external_account_not_found: "No encontramos la cuenta destino. Revísala e inténtalo nuevamente.",
+      external_transfer_pin_required: "Escribe tu PIN de confirmación para transferir a otra cuenta.",
+      invalid_transfer_type: "Selecciona un tipo de transferencia válido.",
+      account_not_empty: "La cuenta solo se puede cerrar cuando su saldo USD y movimientos pendientes están en cero.",
     };
     return messages[error.response.code] ?? error.response.error;
   }
@@ -76,6 +95,7 @@ function sessionFromTokens(tokens: { access_token: string; refresh_token: string
 }
 
 function App() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [session, setSession] = useState<Session | null>(() => readStoredSession());
   const [sessionReady, setSessionReady] = useState(false);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
@@ -86,7 +106,15 @@ function App() {
   const [oauthPending, setOauthPending] = useState<OAuthPending | null>(null);
   const [authForm, setAuthForm] = useState<AuthForm>({ email: "", password: "", fullName: "", mfaCode: "" });
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountBalances, setAccountBalances] = useState<Record<string, Balance>>({});
   const [selectedAccountId, setSelectedAccountId] = useState("");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountNotice, setAccountNotice] = useState<FormNotice | null>(null);
+  const [accountRenameBusyId, setAccountRenameBusyId] = useState("");
+  const [accountDeleteBusyId, setAccountDeleteBusyId] = useState("");
+  const [profileFullName, setProfileFullName] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileNotice, setProfileNotice] = useState<FormNotice | null>(null);
   const [balance, setBalance] = useState<Balance | null>(null);
   const [history, setHistory] = useState<HistoryResponse | null>(null);
   const [historyPages, setHistoryPages] = useState<HistoryResponse[]>([]);
@@ -97,6 +125,8 @@ function App() {
   const [operationMode, setOperationMode] = useState<OperationMode>("deposit");
   const [operationAmount, setOperationAmount] = useState("");
   const [destinationAccountId, setDestinationAccountId] = useState("");
+  const [transferTargetType, setTransferTargetType] = useState<TransferTargetType>("own");
+  const [transferConfirmationPin, setTransferConfirmationPin] = useState("");
   const [operationBusy, setOperationBusy] = useState(false);
   const [operationNotice, setOperationNotice] = useState<FormNotice | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
@@ -107,15 +137,34 @@ function App() {
   const [mfaBusy, setMfaBusy] = useState(false);
   const [mfaLoading, setMfaLoading] = useState(false);
   const [mfaNotice, setMfaNotice] = useState<FormNotice | null>(null);
-  const [mcpTools, setMcpTools] = useState<MCPTool[]>([]);
-  const [mcpLoading, setMcpLoading] = useState(false);
   const [mcpError, setMcpError] = useState("");
   const [assistantInput, setAssistantInput] = useState("");
-  const [assistantReply, setAssistantReply] = useState<{ message: string; data?: unknown; confirmation: boolean } | null>(null);
+  const [assistantReply, setAssistantReply] = useState<AssistantReply | null>(null);
+  const [assistantConversation, setAssistantConversation] = useState<MCPConversationState | null>(null);
+  const [assistantAccountOptions, setAssistantAccountOptions] = useState<MCPAccountOption[]>([]);
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [mcpAction, setMcpAction] = useState<MCPAction | null>(null);
   const [mcpActionBusy, setMcpActionBusy] = useState(false);
   const [mcpActionNotice, setMcpActionNotice] = useState<FormNotice | null>(null);
+  const [mcpPinConfigured, setMcpPinConfigured] = useState(false);
+  const [mcpPinExpiresAt, setMcpPinExpiresAt] = useState<string | undefined>();
+  const [mcpPin, setMcpPin] = useState("");
+  const [mcpConfirmationPin, setMcpConfirmationPin] = useState("");
+  const [mcpPinBusy, setMcpPinBusy] = useState(false);
+  const [mcpPinNotice, setMcpPinNotice] = useState<FormNotice | null>(null);
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      document.documentElement.dataset.theme = resolveTheme(themeMode);
+    };
+    applyTheme();
+    if (themeMode === "system") {
+      media.addEventListener("change", applyTheme);
+    }
+    window.localStorage.setItem("hypernova.theme", themeMode);
+    return () => media.removeEventListener("change", applyTheme);
+  }, [themeMode]);
 
   function establishSession(nextSession: Session) {
     storeSession(nextSession);
@@ -181,19 +230,27 @@ function App() {
     try {
       const response = await apiClient.listAccounts({ accessToken: session.accessToken });
       setAccounts(response.items);
+      const balanceEntries = await Promise.all(response.items.map(async (account) => {
+        try { return [account.id, await apiClient.getBalance(account.id, { accessToken: session.accessToken })] as const; }
+        catch { return null; }
+      }));
+      setAccountBalances(Object.fromEntries(balanceEntries.filter((entry): entry is readonly [string, Balance] => entry !== null)));
       setSelectedAccountId((current) => current || response.items[0]?.id || "");
+      setProfileFullName((current) => current || session.user.full_name);
       setDashboardError("");
     } catch (error) { setDashboardError(displayError(error)); }
   }, [sessionReady, session, mfaStatus?.enabled]);
 
-  const loadAccountData = useCallback(async () => {
-    if (!sessionReady || !session || !mfaStatus?.enabled || !selectedAccountId) return;
+  const loadAccountData = useCallback(async (accountID = selectedAccountId) => {
+    if (!sessionReady || !session || !mfaStatus?.enabled || !accountID) return;
     setDashboardLoading(true);
     try {
-      const [nextBalance, nextHistory] = await Promise.all([apiClient.getBalance(selectedAccountId, { accessToken: session.accessToken }), apiClient.getHistory(selectedAccountId, { accessToken: session.accessToken, limit: 8 })]);
+      const [nextBalance, nextHistory] = await Promise.all([apiClient.getBalance(accountID, { accessToken: session.accessToken }), apiClient.getHistory(accountID, { accessToken: session.accessToken, limit: HISTORY_PAGE_SIZE })]);
       setBalance(nextBalance);
+      setAccountBalances((current) => ({ ...current, [accountID]: nextBalance }));
       setHistory(nextHistory);
       setHistoryPages([nextHistory]);
+      setHistoryPage(1);
       setDashboardError("");
     } catch (error) { setDashboardError(displayError(error)); }
     finally { setDashboardLoading(false); }
@@ -218,13 +275,52 @@ function App() {
 
   const loadMCP = useCallback(async () => {
     if (!sessionReady || !session || !mfaStatus?.enabled) return;
-    setMcpLoading(true);
-    try { setMcpTools((await apiClient.listMCPTools({ accessToken: session.accessToken })).tools); setMcpError(""); }
+    try {
+      const pinStatus = await apiClient.getMCPPINStatus({ accessToken: session.accessToken });
+      setMcpPinConfigured(pinStatus.configured);
+      setMcpPinExpiresAt(pinStatus.expires_at);
+      const pending = await apiClient.getPendingMCPAction({ accessToken: session.accessToken });
+      setMcpAction(pending.action);
+      setMcpError("");
+    }
     catch (error) { setMcpError(displayError(error)); }
-    finally { setMcpLoading(false); }
   }, [sessionReady, session, mfaStatus?.enabled]);
 
   useEffect(() => { void loadMCP(); }, [loadMCP]);
+
+  useEffect(() => {
+    if (!mcpAction || (mcpAction.status !== "ready" && mcpAction.status !== "confirming")) return;
+    const expiresAt = Date.parse(mcpAction.expires_at);
+    if (!Number.isFinite(expiresAt)) return;
+    const expireAction = () => {
+      setMcpAction(null);
+      setAssistantConversation(null);
+      setAssistantAccountOptions([]);
+      setMcpConfirmationPin("");
+      setMcpActionNotice({ tone: "error", message: "La operación pendiente expiró. Puedes iniciar una nueva operación." });
+    };
+    const delay = expiresAt - Date.now();
+    if (delay <= 0) { expireAction(); return; }
+    const timer = window.setTimeout(expireAction, delay);
+    return () => window.clearTimeout(timer);
+  }, [mcpAction]);
+
+  useEffect(() => {
+    if (!mcpPinExpiresAt) return;
+    const expiresAt = Date.parse(mcpPinExpiresAt);
+    if (!Number.isFinite(expiresAt)) return;
+    const expirePIN = () => {
+      setMcpPinConfigured(false);
+      setMcpPinNotice({ tone: "error", message: "Tu PIN venció. Genera uno nuevo para confirmar operaciones." });
+    };
+    const delay = expiresAt - Date.now();
+    if (delay <= 0) {
+      expirePIN();
+      return;
+    }
+    const timer = window.setTimeout(expirePIN, delay);
+    return () => window.clearTimeout(timer);
+  }, [mcpPinExpiresAt]);
 
   function validateAuthFields(): boolean {
     const errors: AuthFieldErrors = {};
@@ -265,7 +361,7 @@ function App() {
         const tokens = await apiClient.login({ email, password: authForm.password });
         establishSession(sessionFromTokens(tokens));
         setMfaStatus(null); setMfaGateReady(false);
-        setAuthNotice({ tone: "success", message: `Cuenta HNL ${registration.account.status === "active" ? "lista" : "en provisión"}.` });
+        setAuthNotice({ tone: "success", message: `Cuenta USD ${registration.account.status === "active" ? "lista" : "en provisión"}.` });
       } else {
         const tokens = await apiClient.login({ email, password: authForm.password, mfa_code: authForm.mfaCode || undefined });
         establishSession(sessionFromTokens(tokens));
@@ -282,7 +378,84 @@ function App() {
   async function handleLogout() {
     if (session) await apiClient.logout(session.accessToken).catch(() => undefined);
     clearStoredSession();
-    setSession(null); setAccounts([]); setBalance(null); setHistory(null); setHistoryPages([]); setHistoryPage(1); setSelectedAccountId(""); setMfaStatus(null); setMfaGateReady(false); setMfaEnrollment(null); setMfaCode(""); setMfaLoading(false); setMfaNotice(null);
+    setSession(null); setAccounts([]); setAccountBalances({}); setBalance(null); setHistory(null); setHistoryPages([]); setHistoryPage(1); setSelectedAccountId(""); setAccountNotice(null); setAccountRenameBusyId(""); setAccountDeleteBusyId(""); setProfileFullName(""); setProfileNotice(null); setMfaStatus(null); setMfaGateReady(false); setMfaEnrollment(null); setMfaCode(""); setMfaLoading(false); setMfaNotice(null); setMcpPinConfigured(false); setMcpPinExpiresAt(undefined); setMcpPin(""); setMcpConfirmationPin(""); setMcpPinNotice(null); setAssistantConversation(null); setAssistantAccountOptions([]);
+  }
+
+  async function handleCreateAccount() {
+    if (!session) return;
+    setAccountBusy(true);
+    setAccountNotice(null);
+    try {
+      const account = await apiClient.createAccount({ currency: "USD" }, { accessToken: session.accessToken });
+      setAccounts((current) => [...current, account]);
+      setSelectedAccountId(account.id);
+      setAccountNotice({ tone: "success", message: "Tu nueva cuenta USD está lista." });
+    } catch (error) {
+      setAccountNotice({ tone: "error", message: displayError(error) });
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
+  async function handleRenameAccount(accountId: string, displayName: string) {
+    if (!session || displayName.trim().length < 2) {
+      setAccountNotice({ tone: "error", message: "Escribe un nombre de al menos dos caracteres." });
+      return;
+    }
+    setAccountRenameBusyId(accountId);
+    setAccountNotice(null);
+    try {
+      const updated = await apiClient.renameAccount(accountId, displayName.trim(), { accessToken: session.accessToken });
+      setAccounts((current) => current.map((account) => account.id === updated.id ? updated : account));
+      setAccountNotice({ tone: "success", message: "Nombre de cuenta actualizado." });
+    } catch (error) { setAccountNotice({ tone: "error", message: displayError(error) }); }
+    finally { setAccountRenameBusyId(""); }
+  }
+
+  async function handleDeleteAccount(accountId: string) {
+    if (!session) return;
+    const account = accounts.find((item) => item.id === accountId);
+    const currentBalance = accountBalances[accountId];
+    if (!account || !currentBalance || currentBalance.available_balance !== "0" || currentBalance.credits_pending !== "0" || currentBalance.debits_pending !== "0") {
+      setAccountNotice({ tone: "error", message: "Solo puedes cerrar una cuenta con saldo USD y movimientos pendientes en cero." });
+      return;
+    }
+    if (!window.confirm(`¿Cerrar ${account.display_name || "esta cuenta"}? Conservaremos su historial, pero ya no recibirá nuevas operaciones.`)) return;
+    setAccountDeleteBusyId(accountId);
+    setAccountNotice(null);
+    try {
+      await apiClient.closeAccount(accountId, { accessToken: session.accessToken });
+      const remaining = accounts.filter((item) => item.id !== accountId);
+      setAccounts(remaining);
+      setAccountBalances((current) => { const next = { ...current }; delete next[accountId]; return next; });
+      setSelectedAccountId((current) => current === accountId ? (remaining[0]?.id ?? "") : current);
+      setAccountNotice({ tone: "success", message: "La cuenta fue cerrada de forma segura." });
+    } catch (error) {
+      setAccountNotice({ tone: "error", message: displayError(error) });
+    } finally {
+      setAccountDeleteBusyId("");
+    }
+  }
+
+  async function handleProfileSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session || profileFullName.trim().length < 2) {
+      setProfileNotice({ tone: "error", message: "Escribe un nombre válido para continuar." });
+      return;
+    }
+    setProfileBusy(true);
+    setProfileNotice(null);
+    try {
+      const user = await apiClient.updateProfile({ full_name: sanitizeFullName(profileFullName) }, { accessToken: session.accessToken });
+      const nextSession = { ...session, user };
+      establishSession(nextSession);
+      setProfileFullName(user.full_name);
+      setProfileNotice({ tone: "success", message: "Tus datos personales fueron actualizados." });
+    } catch (error) {
+      setProfileNotice({ tone: "error", message: displayError(error) });
+    } finally {
+      setProfileBusy(false);
+    }
   }
 
   function handleFullNameChange(value: string) {
@@ -317,14 +490,19 @@ function App() {
   async function handleOperation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!session || !activeAccount) return;
+    const minorAmount = currencyInputToMinor(operationAmount);
+    if (!minorAmount || minorAmount === "0") {
+      setOperationNotice({ tone: "error", message: "Escribe un monto válido mayor que USD 0.00." });
+      return;
+    }
     setOperationBusy(true); setOperationNotice(null);
     const idempotencyKey = createIdempotencyKey();
     try {
       let operation: Operation;
-      if (operationMode === "deposit") operation = await apiClient.deposit(activeAccount.id, { amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
-      else if (operationMode === "withdraw") operation = await apiClient.withdraw(activeAccount.id, { amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
-      else operation = await apiClient.transfer({ source_account_id: activeAccount.id, destination_account_id: destinationAccountId, amount: operationAmount, currency: "HNL" }, { accessToken: session.accessToken, idempotencyKey });
-      setOperationNotice({ tone: "success", message: `${operationLabel(operation)} por ${formatMinorAmount(operation.amount)}.` }); setOperationAmount(""); setDestinationAccountId(""); await loadAccountData();
+      if (operationMode === "deposit") operation = await apiClient.deposit(activeAccount.id, { amount: minorAmount, currency: "USD" }, { accessToken: session.accessToken, idempotencyKey });
+      else if (operationMode === "withdraw") operation = await apiClient.withdraw(activeAccount.id, { amount: minorAmount, currency: "USD" }, { accessToken: session.accessToken, idempotencyKey });
+      else operation = await apiClient.transfer({ source_account_id: activeAccount.id, destination_account_id: destinationAccountId, amount: minorAmount, currency: "USD", transfer_type: transferTargetType, confirmation_pin: transferTargetType === "external" ? transferConfirmationPin : undefined }, { accessToken: session.accessToken, idempotencyKey });
+      setOperationNotice({ tone: "success", message: `${operationLabel(operation)} por ${formatMinorAmount(operation.amount)}.` }); setOperationAmount(""); setDestinationAccountId(""); setTransferConfirmationPin(""); await loadAccountData();
     } catch (error) {
       if (error instanceof ApiError && (error.status === 401 || error.response.code === "mfa_required")) { await handleLogout(); setAuthNotice({ tone: "error", message: displayError(error) }); return; }
       setOperationNotice({ tone: "error", message: displayError(error) });
@@ -334,7 +512,7 @@ function App() {
   async function loadMoreHistory() {
     if (!session || !selectedAccountId || !history?.next_cursor) return;
     setHistoryPageBusy(true);
-    try { const nextPage = await apiClient.getHistory(selectedAccountId, { accessToken: session.accessToken, limit: 8, cursor: history.next_cursor }); setHistoryPages((current) => [...current, nextPage]); setHistory(nextPage); setHistoryPage((current) => current + 1); }
+    try { const nextPage = await apiClient.getHistory(selectedAccountId, { accessToken: session.accessToken, limit: HISTORY_PAGE_SIZE, cursor: history.next_cursor }); setHistoryPages((current) => [...current, nextPage]); setHistory(nextPage); setHistoryPage((current) => current + 1); }
     catch (error) { setDashboardError(displayError(error)); }
     finally { setHistoryPageBusy(false); }
   }
@@ -354,13 +532,21 @@ function App() {
     finally { setExportBusy(false); }
   }
 
-  async function handleAssistantSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!session || !assistantInput.trim()) return;
+  async function sendAssistantMessage(message: string) {
+    if (!session || !message.trim()) return;
     setAssistantBusy(true);
-    try { const response = await apiClient.sendChatMessage(assistantInput.trim(), { accessToken: session.accessToken }); setAssistantReply({ message: response.message, data: response.read_only_data, confirmation: response.requires_confirmation }); setAssistantInput(""); }
-    catch (error) { if (error instanceof ApiError && error.status === 401) { await handleLogout(); setAuthNotice({ tone: "error", message: displayError(error) }); return; } setMcpError(displayError(error)); }
+    try { const response = await apiClient.sendChatMessage(message.trim(), activeAccount?.id, assistantConversation, { accessToken: session.accessToken }); setAssistantReply({ id: createIdempotencyKey(), message: response.message, data: response.read_only_data, confirmation: response.requires_confirmation, conversation: response.conversation, accountOptions: response.account_options ?? [] }); setAssistantConversation(response.conversation ?? null); setAssistantAccountOptions(response.account_options ?? []); setMcpAction(response.action ?? null); setMcpActionNotice(null); setAssistantInput(""); }
+    catch (error) { if (error instanceof ApiError && error.status === 401) { await handleLogout(); setAuthNotice({ tone: "error", message: displayError(error) }); return; } setAssistantReply({ id: createIdempotencyKey(), message: displayError(error), confirmation: false }); setMcpError(""); }
     finally { setAssistantBusy(false); }
+  }
+
+  function handleAssistantSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void sendAssistantMessage(assistantInput);
+  }
+
+  function handleAssistantAccountSelect(accountId: string) {
+    void sendAssistantMessage(`cuenta ${accountId}`);
   }
 
   async function handlePrepareMCPAction(request: MCPActionRequest) {
@@ -378,11 +564,28 @@ function App() {
 
   async function handleConfirmMCPAction() {
     if (!session || !mcpAction) return;
+    if (!/^\d{4}$/u.test(mcpConfirmationPin)) {
+      setMcpActionNotice({ tone: "error", message: "Escribe el PIN de cuatro dígitos para confirmar." });
+      return;
+    }
     setMcpActionBusy(true);
     setMcpActionNotice(null);
     try {
-      setMcpAction(await apiClient.confirmMCPAction(mcpAction.id, { accessToken: session.accessToken }));
-      await loadAccountData();
+      const affectedAccountID = mcpAction.payload.account_id || mcpAction.payload.source_account_id || selectedAccountId;
+      const confirmed = await apiClient.confirmMCPAction(mcpAction.id, mcpConfirmationPin, { accessToken: session.accessToken });
+      setMcpAction(confirmed);
+      setAssistantReply({ id: createIdempotencyKey(), message: "Operación confirmada correctamente. Aquí tienes tu comprobante.", data: confirmed.operation, confirmation: false });
+      setAssistantConversation(null);
+      setAssistantAccountOptions([]);
+      setMcpConfirmationPin("");
+      if (affectedAccountID && affectedAccountID !== selectedAccountId) setSelectedAccountId(affectedAccountID);
+      await loadAccountData(affectedAccountID);
+      // TigerBeetle balance reads can become visible a few milliseconds before
+      // the account-transfer index is returned. Re-read the same account once
+      // so the history panel reflects the confirmed movement without inventing
+      // a client-side transaction.
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      await loadAccountData(affectedAccountID);
     } catch (error) {
       setMcpActionNotice({ tone: "error", message: displayError(error) });
     } finally {
@@ -395,11 +598,38 @@ function App() {
     setMcpActionBusy(true);
     setMcpActionNotice(null);
     try {
-      setMcpAction(await apiClient.cancelMCPAction(mcpAction.id, { accessToken: session.accessToken }));
+      await apiClient.cancelMCPAction(mcpAction.id, { accessToken: session.accessToken });
+      setMcpAction(null);
+      setAssistantConversation(null);
+      setAssistantAccountOptions([]);
+      setMcpConfirmationPin("");
+      setAssistantReply({ id: createIdempotencyKey(), message: "Operación cancelada. Puedes iniciar otra cuando quieras.", confirmation: false });
     } catch (error) {
       setMcpActionNotice({ tone: "error", message: displayError(error) });
     } finally {
       setMcpActionBusy(false);
+    }
+  }
+
+  async function handleSetMCPPIN(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session || !/^\d{4}$/u.test(mcpPin)) {
+      setMcpPinNotice({ tone: "error", message: "El PIN debe contener exactamente cuatro dígitos." });
+      return;
+    }
+    setMcpPinBusy(true);
+    setMcpPinNotice(null);
+    try {
+      await apiClient.setMCPPIN(mcpPin, { accessToken: session.accessToken });
+      const pinStatus = await apiClient.getMCPPINStatus({ accessToken: session.accessToken });
+      setMcpPinConfigured(pinStatus.configured);
+      setMcpPinExpiresAt(pinStatus.expires_at);
+      setMcpPin("");
+      setMcpPinNotice({ tone: "success", message: "PIN activo durante tres minutos." });
+    } catch (error) {
+      setMcpPinNotice({ tone: "error", message: displayError(error) });
+    } finally {
+      setMcpPinBusy(false);
     }
   }
 
@@ -410,7 +640,7 @@ function App() {
   }
   if (!mfaGateReady || mfaStatus === null) return <MFAStatusLoading notice={mfaNotice} onLogout={handleLogout} />;
   if (!mfaStatus.enabled) return <MFAOnboarding user={session.user} enrollment={mfaEnrollment} code={mfaCode} busy={mfaBusy} loading={mfaLoading} notice={mfaNotice} onCodeChange={setMfaCode} onBegin={beginMFAEnrollment} onVerify={verifyMFAEnrollment} onLogout={handleLogout} />;
-  return <DashboardPage user={session.user} accounts={accounts} activeAccount={activeAccount} balance={balance} history={history} historyPage={historyPage} dashboardLoading={dashboardLoading} dashboardError={dashboardError} operationMode={operationMode} operationAmount={operationAmount} destinationAccountId={destinationAccountId} operationBusy={operationBusy} operationNotice={operationNotice} exportBusy={exportBusy} mcpTools={mcpTools} mcpLoading={mcpLoading} mcpError={mcpError} assistantInput={assistantInput} assistantReply={assistantReply} assistantBusy={assistantBusy} mcpAction={mcpAction} mcpActionBusy={mcpActionBusy} mcpActionNotice={mcpActionNotice} historyHasMore={Boolean(history?.has_more)} historyPageBusy={historyPageBusy} onAccountChange={(accountId) => { setSelectedAccountId(accountId); setBalance(null); setHistory(null); setHistoryPages([]); setHistoryPage(1); }} onOperationModeChange={(mode) => { setOperationMode(mode); setOperationNotice(null); }} onAmountChange={setOperationAmount} onDestinationChange={setDestinationAccountId} onOperation={handleOperation} onExport={handleExport} onPreviousHistory={loadPreviousHistory} onNextHistory={loadMoreHistory} onAssistantInput={setAssistantInput} onAssistantSubmit={handleAssistantSubmit} onPrepareMCPAction={(request) => void handlePrepareMCPAction(request)} onConfirmMCPAction={() => void handleConfirmMCPAction()} onCancelMCPAction={() => void handleCancelMCPAction()} onLogout={handleLogout} />;
+  return <DashboardPage themeMode={themeMode} onThemeModeChange={setThemeMode} user={session.user} accounts={accounts} accountBalances={accountBalances} activeAccount={activeAccount} balance={balance} history={history} historyPage={historyPage} dashboardLoading={dashboardLoading} dashboardError={dashboardError} operationMode={operationMode} operationAmount={operationAmount} destinationAccountId={destinationAccountId} transferTargetType={transferTargetType} transferConfirmationPin={transferConfirmationPin} operationBusy={operationBusy} operationNotice={operationNotice} exportBusy={exportBusy} accountBusy={accountBusy} accountNotice={accountNotice} accountRenameBusyId={accountRenameBusyId} accountDeleteBusyId={accountDeleteBusyId} profileFullName={profileFullName || session.user.full_name} profileBusy={profileBusy} profileNotice={profileNotice} mcpError={mcpError} assistantInput={assistantInput} assistantReply={assistantReply} assistantConversation={assistantConversation} assistantAccountOptions={assistantAccountOptions} assistantBusy={assistantBusy} mcpAction={mcpAction} mcpActionBusy={mcpActionBusy} mcpActionNotice={mcpActionNotice} mcpPinConfigured={mcpPinConfigured} mcpPinExpiresAt={mcpPinExpiresAt} mcpPin={mcpPin} mcpConfirmationPin={mcpConfirmationPin} mcpPinBusy={mcpPinBusy} mcpPinNotice={mcpPinNotice} historyHasMore={Boolean(history?.has_more)} historyPageBusy={historyPageBusy} onAccountChange={(accountId) => { setSelectedAccountId(accountId); setDestinationAccountId(""); setAssistantConversation(null); setAssistantAccountOptions([]); }} onCreateAccount={() => void handleCreateAccount()} onRenameAccount={(accountId, displayName) => void handleRenameAccount(accountId, displayName)} onDeleteAccount={(accountId) => void handleDeleteAccount(accountId)} onOperationModeChange={(mode) => { setOperationMode(mode); setOperationNotice(null); }} onAmountChange={setOperationAmount} onDestinationChange={setDestinationAccountId} onTransferTargetTypeChange={(target) => { setTransferTargetType(target); setDestinationAccountId(""); setTransferConfirmationPin(""); }} onTransferConfirmationPinChange={(pin) => setTransferConfirmationPin(pin.replace(/\D/g, "").slice(0, 4))} onOperation={handleOperation} onExport={handleExport} onPreviousHistory={loadPreviousHistory} onNextHistory={loadMoreHistory} onAssistantInput={setAssistantInput} onAssistantSubmit={handleAssistantSubmit} onAssistantAccountSelect={handleAssistantAccountSelect} onPrepareMCPAction={(request) => void handlePrepareMCPAction(request)} onConfirmMCPAction={() => void handleConfirmMCPAction()} onCancelMCPAction={() => void handleCancelMCPAction()} onMCPPINChange={(pin) => setMcpPin(pin.replace(/\D/g, "").slice(0, 4))} onMCPConfirmationPINChange={(pin) => setMcpConfirmationPin(pin.replace(/\D/g, "").slice(0, 4))} onSetMCPPIN={handleSetMCPPIN} onProfileNameChange={setProfileFullName} onProfileSubmit={handleProfileSubmit} onLogout={handleLogout} />;
 }
 
 export default App;

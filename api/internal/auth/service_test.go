@@ -65,6 +65,27 @@ func TestValidateRegistrationRejectsDisplayEmail(t *testing.T) {
 	}
 }
 
+func TestValidateRegistrationAcceptsAccentsAndRejectsSymbols(t *testing.T) {
+	for _, name := range []string{"María José", "Ñusta Pérez", "José Alvarez"} {
+		if _, err := ValidateRegistration(RegisterInput{
+			Email:    "person@example.com",
+			Password: "Safe-password1!",
+			FullName: name,
+		}); err != nil {
+			t.Fatalf("expected international name %q to pass: %v", name, err)
+		}
+	}
+	for _, name := range []string{"Ana_123", "Ana\nPerez", "Ana/Perez"} {
+		if _, err := ValidateRegistration(RegisterInput{
+			Email:    "person@example.com",
+			Password: "Safe-password1!",
+			FullName: name,
+		}); err == nil {
+			t.Fatalf("expected invalid name %q to be rejected", name)
+		}
+	}
+}
+
 func TestValidateLoginRejectsIncompleteRequest(t *testing.T) {
 	if _, err := ValidateLogin("person@example.com", ""); err == nil {
 		t.Fatal("expected empty password to be rejected")

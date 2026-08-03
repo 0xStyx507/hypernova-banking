@@ -25,6 +25,19 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// ToolError preserves the public MCP error contract across the assistant
+// boundary. The chat handler can then return an actionable 403/404/409/422
+// instead of disguising every tool failure as a generic 502.
+type ToolError struct {
+	Status  int
+	Code    string
+	Message string
+}
+
+func (e *ToolError) Error() string {
+	return fmt.Sprintf("MCP tool returned status %d (%s)", e.Status, e.Code)
+}
+
 // NewClient constructs a stateless MCP client.
 func NewClient(config ClientConfig) *Client {
 	return &Client{baseURL: strings.TrimRight(config.BaseURL, "/"), httpClient: config.HTTPClient}
@@ -60,7 +73,18 @@ func (c *Client) Call(ctx context.Context, accessToken, name string, arguments a
 		return nil, fmt.Errorf("read MCP response: %w", err)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("MCP tool returned status %d: %s", response.StatusCode, strings.TrimSpace(string(responseBody)))
+		var publicError struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		_ = json.Unmarshal(responseBody, &publicError)
+		if strings.TrimSpace(publicError.Code) == "" {
+			publicError.Code = "assistant_tool_error"
+		}
+		if strings.TrimSpace(publicError.Error) == "" {
+			publicError.Error = "No pudimos completar la consulta del asistente."
+		}
+		return nil, &ToolError{Status: response.StatusCode, Code: publicError.Code, Message: publicError.Error}
 	}
 	var envelope struct {
 		Result json.RawMessage `json:"result"`

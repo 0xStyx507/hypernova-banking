@@ -24,16 +24,17 @@ import (
 const (
 	defaultExpiry = 5 * time.Minute
 	maxReasonLen  = 280
-	maxPending    = 20
+	maxPending    = 1
 )
 
 var (
-	ErrInvalidInput = errors.New("invalid prepared action")
-	ErrNotFound     = errors.New("prepared action not found")
-	ErrConflict     = errors.New("prepared action state conflict")
-	ErrExpired      = errors.New("prepared action expired")
-	ErrCancelled    = errors.New("prepared action cancelled")
-	ErrIntegrity    = errors.New("prepared action integrity failure")
+	ErrInvalidInput  = errors.New("invalid prepared action")
+	ErrNotFound      = errors.New("prepared action not found")
+	ErrConflict      = errors.New("prepared action state conflict")
+	ErrExpired       = errors.New("prepared action expired")
+	ErrCancelled     = errors.New("prepared action cancelled")
+	ErrIntegrity     = errors.New("prepared action integrity failure")
+	ErrPendingAction = errors.New("another prepared action is awaiting confirmation")
 )
 
 // ActionRequest contains user intent collected by an assistant. Amounts are
@@ -43,6 +44,7 @@ type ActionRequest struct {
 	AccountID          string `json:"account_id,omitempty"`
 	SourceAccountID    string `json:"source_account_id,omitempty"`
 	DestinationAccount string `json:"destination_account_id,omitempty"`
+	TransferType       string `json:"transfer_type,omitempty"`
 	Amount             string `json:"amount"`
 	Currency           string `json:"currency"`
 	Reason             string `json:"reason,omitempty"`
@@ -54,6 +56,7 @@ type ActionPayload struct {
 	AccountID          string `json:"account_id,omitempty"`
 	SourceAccountID    string `json:"source_account_id,omitempty"`
 	DestinationAccount string `json:"destination_account_id,omitempty"`
+	TransferType       string `json:"transfer_type,omitempty"`
 	Amount             string `json:"amount"`
 	Currency           string `json:"currency"`
 	Reason             string `json:"reason,omitempty"`
@@ -109,7 +112,7 @@ func (s *Service) Prepare(ctx context.Context, userID uuid.UUID, request ActionR
 		return Action{}, fmt.Errorf("count pending actions: %w", err)
 	}
 	if pending >= maxPending {
-		return Action{}, ErrConflict
+		return Action{}, ErrPendingAction
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO mcp_prepared_actions (id, user_id, action_type, payload, payload_hash, expires_at)
@@ -121,7 +124,7 @@ func (s *Service) Prepare(ctx context.Context, userID uuid.UUID, request ActionR
 	if err := audit.Record(ctx, tx, &userID, "mcp_action_prepared", map[string]any{
 		"action_id": actionID.String(), "action": payload.ActionType, "account_id": payload.AccountID,
 		"source_account_id": payload.SourceAccountID, "destination_account_id": payload.DestinationAccount,
-		"amount": payload.Amount, "currency": payload.Currency, "reason": payload.Reason,
+		"transfer_type": payload.TransferType, "amount": payload.Amount, "currency": payload.Currency, "reason": payload.Reason,
 	}, metadata.IPAddress, metadata.UserAgent); err != nil {
 		return Action{}, fmt.Errorf("audit prepared action: %w", err)
 	}
@@ -176,6 +179,28 @@ func (s *Service) Load(ctx context.Context, userID uuid.UUID, publicID string) (
 		action.Status = "expired"
 	}
 	return action, nil
+}
+
+// Pending returns the user's single active prepared action, if one exists.
+// Clients use it after a reload so a pending confirmation cannot become an
+// orphaned operation that blocks the next request.
+func (s *Service) Pending(ctx context.Context, userID uuid.UUID) (Action, error) {
+	if s == nil || s.pool == nil || userID == uuid.Nil {
+		return Action{}, ErrNotFound
+	}
+	var id uuid.UUID
+	err := s.pool.QueryRow(ctx, `
+		SELECT id FROM mcp_prepared_actions
+		WHERE user_id = $1 AND status IN ('ready', 'confirming') AND expires_at > NOW()
+		ORDER BY created_at DESC LIMIT 1
+	`, userID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Action{}, ErrNotFound
+	}
+	if err != nil {
+		return Action{}, fmt.Errorf("load pending prepared action: %w", err)
+	}
+	return s.Load(ctx, userID, id.String())
 }
 
 // Claim atomically marks a ready action as confirming. Reclaiming an existing
@@ -247,7 +272,7 @@ func (s *Service) Confirm(ctx context.Context, userID uuid.UUID, action Action, 
 	case "withdrawal":
 		operation, err = s.ledger.Withdraw(ctx, userID, action.Payload.AccountID, action.Payload.Amount, action.ID, metadata)
 	case "transfer":
-		operation, err = s.ledger.Transfer(ctx, userID, action.Payload.SourceAccountID, action.Payload.DestinationAccount, action.Payload.Amount, action.ID, metadata)
+		operation, err = s.ledger.TransferWithScope(ctx, userID, action.Payload.SourceAccountID, action.Payload.DestinationAccount, action.Payload.Amount, action.ID, action.Payload.TransferType, metadata)
 	default:
 		return Action{}, ErrInvalidInput
 	}
@@ -273,7 +298,7 @@ func (s *Service) Confirm(ctx context.Context, userID uuid.UUID, action Action, 
 	}
 	if err := audit.Record(ctx, tx, &userID, "mcp_action_confirmed", map[string]any{
 		"action_id": action.ID, "operation_id": operation.ID, "action": action.Payload.ActionType,
-		"amount": action.Payload.Amount, "currency": action.Payload.Currency,
+		"transfer_type": action.Payload.TransferType, "amount": action.Payload.Amount, "currency": action.Payload.Currency,
 	}, metadata.IPAddress, metadata.UserAgent); err != nil {
 		return Action{}, fmt.Errorf("audit confirmed action: %w", err)
 	}
@@ -286,7 +311,9 @@ func (s *Service) Confirm(ctx context.Context, userID uuid.UUID, action Action, 
 	return action, nil
 }
 
-// Cancel invalidates a ready or confirming action without touching the ledger.
+// Cancel invalidates a ready action, or a stale confirming action left by an
+// interrupted request. A fresh confirming action remains protected briefly so
+// an in-flight ledger operation cannot be cancelled concurrently.
 func (s *Service) Cancel(ctx context.Context, userID uuid.UUID, publicID string, metadata ledger.RequestMetadata) (Action, error) {
 	action, err := s.Load(ctx, userID, publicID)
 	if err != nil {
@@ -303,7 +330,7 @@ func (s *Service) Cancel(ctx context.Context, userID uuid.UUID, publicID string,
 		return Action{}, fmt.Errorf("begin cancelled action: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	commandTag, err := tx.Exec(ctx, `UPDATE mcp_prepared_actions SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW() WHERE id = $1 AND user_id = $2 AND status = 'ready'`, uuid.MustParse(action.ID), userID)
+	commandTag, err := tx.Exec(ctx, `UPDATE mcp_prepared_actions SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW() WHERE id = $1 AND user_id = $2 AND (status = 'ready' OR (status = 'confirming' AND updated_at < NOW() - INTERVAL '30 seconds'))`, uuid.MustParse(action.ID), userID)
 	if err != nil {
 		return Action{}, fmt.Errorf("cancel prepared action: %w", err)
 	}
@@ -335,12 +362,12 @@ func normalizeRequest(request ActionRequest) (ActionPayload, error) {
 	action := strings.ToLower(strings.TrimSpace(request.ActionType))
 	currency := strings.ToUpper(strings.TrimSpace(request.Currency))
 	if currency == "" {
-		currency = "HNL"
+		currency = "USD"
 	}
-	if currency != "HNL" || !validAmount(request.Amount) {
+	if currency != "USD" || !validAmount(request.Amount) {
 		return ActionPayload{}, ErrInvalidInput
 	}
-	payload := ActionPayload{ActionType: action, AccountID: strings.TrimSpace(request.AccountID), SourceAccountID: strings.TrimSpace(request.SourceAccountID), DestinationAccount: strings.TrimSpace(request.DestinationAccount), Amount: strings.TrimSpace(request.Amount), Currency: currency, Reason: strings.TrimSpace(request.Reason)}
+	payload := ActionPayload{ActionType: action, AccountID: strings.TrimSpace(request.AccountID), SourceAccountID: strings.TrimSpace(request.SourceAccountID), DestinationAccount: strings.TrimSpace(request.DestinationAccount), TransferType: strings.TrimSpace(request.TransferType), Amount: strings.TrimSpace(request.Amount), Currency: currency, Reason: strings.TrimSpace(request.Reason)}
 	if len(payload.Reason) > maxReasonLen {
 		return ActionPayload{}, ErrInvalidInput
 	}
@@ -350,6 +377,11 @@ func normalizeRequest(request ActionRequest) (ActionPayload, error) {
 			return ActionPayload{}, ErrInvalidInput
 		}
 	case "transfer":
+		scope, err := ledger.NormalizeTransferScope(payload.TransferType)
+		if err != nil {
+			return ActionPayload{}, ErrInvalidInput
+		}
+		payload.TransferType = string(scope)
 		if _, err := uuid.Parse(payload.SourceAccountID); err != nil {
 			return ActionPayload{}, ErrInvalidInput
 		}
@@ -377,6 +409,7 @@ func intentHash(payload ActionPayload) [32]byte {
 		payload.DestinationAccount,
 		payload.Amount,
 		payload.Currency,
+		payload.TransferType,
 		payload.Reason,
 	}, "\x00")
 	return sha256.Sum256([]byte(value))

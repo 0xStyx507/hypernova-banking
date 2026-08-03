@@ -15,7 +15,7 @@ import (
 )
 
 type mcpConfirmationRequest struct {
-	Confirmation string `json:"confirmation"`
+	PIN string `json:"pin"`
 }
 
 type mcpToolCallRequest struct {
@@ -24,6 +24,7 @@ type mcpToolCallRequest struct {
 }
 
 type mcpHandler struct {
+	auth    *auth.Service
 	service *mcp.Service
 	ledger  *ledger.Service
 }
@@ -35,12 +36,13 @@ func registerMCPRoutes(router chi.Router, authService *auth.Service, service *mc
 	if authService == nil || service == nil {
 		return
 	}
-	handler := mcpHandler{service: service, ledger: ledgerService}
+	handler := mcpHandler{auth: authService, service: service, ledger: ledgerService}
 	router.Route("/api/v1/mcp", func(router chi.Router) {
 		router.Use(ledgerAuthentication(authService), requireMFA(authService))
 		router.Get("/tools", handler.tools)
 		router.Post("/tools/call", handler.callTool)
 		router.Post("/actions", handler.prepare)
+		router.Get("/actions/pending", handler.pending)
 		router.Get("/actions/{action_id}", handler.get)
 		router.Post("/actions/{action_id}/confirm", handler.confirm)
 		router.Post("/actions/{action_id}/cancel", handler.cancel)
@@ -52,7 +54,7 @@ func (h mcpHandler) tools(w http.ResponseWriter, _ *http.Request) {
 		"protocol": "hypernova-mcp-http/1",
 		"tools": []map[string]any{
 			{"name": "get_accounts", "read_only": true, "description": "List accounts owned by the authenticated user."},
-			{"name": "get_balance", "read_only": true, "description": "Read a TigerBeetle-backed HNL balance."},
+			{"name": "get_balance", "read_only": true, "description": "Read a TigerBeetle-backed USD balance."},
 			{"name": "get_transactions", "read_only": true, "description": "Read account history with cursor pagination."},
 			{"name": "prepare_financial_action", "read_only": false, "description": "Prepare a deposit, withdrawal, or transfer for explicit confirmation."},
 		},
@@ -96,6 +98,10 @@ func (h mcpHandler) callTool(w http.ResponseWriter, r *http.Request) {
 		}
 		if arguments.Limit == 0 {
 			arguments.Limit = 50
+		}
+		if arguments.Limit > 100 {
+			writeErrorCode(w, http.StatusBadRequest, "invalid_mcp_arguments", "limit must be between 1 and 100")
+			return
 		}
 		items, historyErr := h.ledger.History(r.Context(), userID, arguments.AccountID, arguments.Limit, arguments.Cursor)
 		if historyErr != nil {
@@ -156,19 +162,45 @@ func (h mcpHandler) get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, action)
 }
 
-func (h mcpHandler) confirm(w http.ResponseWriter, r *http.Request) {
-	var request mcpConfirmationRequest
-	if err := decodeJSON(w, r, &request); err != nil || request.Confirmation != "CONFIRM" {
-		writeErrorCode(w, http.StatusBadRequest, "explicit_confirmation_required", "confirmation must be exactly CONFIRM")
+func (h mcpHandler) pending(w http.ResponseWriter, r *http.Request) {
+	action, err := h.service.Pending(r.Context(), authenticatedUser(r))
+	if errors.Is(err, mcp.ErrNotFound) {
+		writeJSON(w, http.StatusOK, map[string]any{"action": nil})
 		return
 	}
-	action, err := h.service.Claim(r.Context(), authenticatedUser(r), chi.URLParam(r, "action_id"))
+	if err != nil {
+		writeMCPError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"action": action})
+}
+
+func (h mcpHandler) confirm(w http.ResponseWriter, r *http.Request) {
+	var request mcpConfirmationRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "pin is required for MCP confirmation")
+		return
+	}
+	if h.auth == nil {
+		writeErrorCode(w, http.StatusServiceUnavailable, "mcp_pin_unavailable", "MCP PIN is unavailable")
+		return
+	}
+	action, err := h.service.Load(r.Context(), authenticatedUser(r), chi.URLParam(r, "action_id"))
 	if err != nil {
 		writeMCPError(w, err)
 		return
 	}
 	if action.Status == "confirmed" {
 		writeJSON(w, http.StatusOK, action)
+		return
+	}
+	if err := h.auth.VerifyMCPPIN(r.Context(), authenticatedUser(r), request.PIN, requestMetadata(r)); err != nil {
+		writeMCPError(w, err)
+		return
+	}
+	action, err = h.service.Claim(r.Context(), authenticatedUser(r), chi.URLParam(r, "action_id"))
+	if err != nil {
+		writeMCPError(w, err)
 		return
 	}
 	confirmed, err := h.service.Confirm(r.Context(), authenticatedUser(r), action, requestMetadataForLedger(r))
@@ -190,6 +222,17 @@ func (h mcpHandler) cancel(w http.ResponseWriter, r *http.Request) {
 
 func writeMCPError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, auth.ErrMCPPINLocked):
+		w.Header().Set("Retry-After", "900")
+		writeErrorCode(w, http.StatusTooManyRequests, "mcp_pin_locked", "MCP confirmation PIN is temporarily locked")
+	case errors.Is(err, auth.ErrMCPPINInvalid):
+		writeErrorCode(w, http.StatusForbidden, "mcp_pin_invalid", "invalid MCP confirmation PIN")
+	case errors.Is(err, auth.ErrMCPPINNotConfigured):
+		writeErrorCode(w, http.StatusConflict, "mcp_pin_not_configured", "configure an MCP PIN before confirming financial actions")
+	case errors.Is(err, auth.ErrMCPPINExpired):
+		writeErrorCode(w, http.StatusConflict, "mcp_pin_expired", "the MCP PIN has expired; generate a new one")
+	case errors.Is(err, auth.ErrMCPPINUnavailable):
+		writeErrorCode(w, http.StatusServiceUnavailable, "mcp_pin_unavailable", "MCP PIN is unavailable")
 	case errors.Is(err, mcp.ErrInvalidInput):
 		writeErrorCode(w, http.StatusBadRequest, "invalid_mcp_action", "invalid prepared action")
 	case errors.Is(err, mcp.ErrNotFound):
@@ -198,6 +241,8 @@ func writeMCPError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusGone, "mcp_action_expired", "prepared action expired")
 	case errors.Is(err, mcp.ErrCancelled):
 		writeErrorCode(w, http.StatusConflict, "mcp_action_cancelled", "prepared action cancelled")
+	case errors.Is(err, mcp.ErrPendingAction):
+		writeErrorCode(w, http.StatusConflict, "mcp_action_pending", "finish or cancel the pending MCP operation before starting another one")
 	case errors.Is(err, mcp.ErrConflict):
 		writeErrorCode(w, http.StatusConflict, "mcp_action_conflict", "prepared action cannot change state")
 	case errors.Is(err, mcp.ErrIntegrity):

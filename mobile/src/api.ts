@@ -3,15 +3,24 @@
  * Tokens are supplied by the screen layer and never logged or embedded in
  * request errors.
  */
-export type Currency = "HNL";
+export type Currency = "USD";
 export type OperationMode = "deposit" | "withdrawal" | "transfer";
 export type OAuthProvider = "google" | "github";
 
 export interface User { id: string; email: string; full_name: string; created_at: string }
-export interface Account { id: string; currency: Currency; type: "checking"; status: string; created_at: string }
+export interface Account { id: string; display_name: string; currency: Currency; type: "checking"; status: "provisioning" | "active" | "failed" | "closed"; created_at: string }
 export interface Balance { account_id: string; currency: Currency; balance: string; available_balance: string; credits_posted: string; debits_posted: string; credits_pending: string; debits_pending: string }
 export interface Transaction { transfer_id: string; type: OperationMode; direction: "credit" | "debit"; amount: string; currency: Currency; created_at: string }
 export interface History { items: Transaction[]; has_more: boolean; next_cursor?: string }
+export interface MCPActionRequest { action: "deposit" | "withdrawal" | "transfer"; account_id?: string; source_account_id?: string; destination_account_id?: string; transfer_type?: "own" | "external"; amount: string; currency: Currency; reason?: string }
+export interface MCPAction { id: string; action: "deposit" | "withdrawal" | "transfer"; status: "ready" | "confirming" | "confirmed" | "cancelled" | "expired" | "failed"; payload: MCPActionRequest; expires_at: string; operation?: Operation }
+export interface MCPTool { name: string; read_only: boolean; description: string }
+export interface MCPToolsResponse { protocol: string; tools: MCPTool[] }
+export interface MCPToolCallResponse { name: string; result: unknown }
+export interface MCPAccountOption { id: string; display_name: string; currency: Currency }
+export interface MCPConversationState { action?: "deposit" | "withdrawal" | "transfer"; account_id?: string; source_account_id?: string; destination_account_id?: string; transfer_type?: "own" | "external"; amount?: string; account_options?: MCPAccountOption[] }
+export interface ChatResponse { message: string; requires_confirmation: boolean; read_only_data?: unknown; action?: MCPAction; conversation?: MCPConversationState; account_options?: MCPAccountOption[] }
+export interface MCPPINStatus { configured: boolean; expires_at?: string }
 export interface Tokens { user: User; access_token: string; refresh_token: string; access_expires_at: string; refresh_expires_at: string }
 export interface MFAStatus { enabled: boolean; enrolled: boolean }
 export interface MFAEnrollment { secret: string; otpauth_uri: string; expires_at: string }
@@ -46,14 +55,21 @@ function resolveBaseUrl(): string {
 
 const baseUrl = resolveBaseUrl();
 
-async function request<T>(path: string, init: RequestInit = {}, accessToken?: string, idempotencyKey?: string): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, accessToken?: string, idempotencyKey?: string, signal?: AbortSignal): Promise<T> {
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (init.body) headers.set("Content-Type", "application/json");
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
   if (idempotencyKey) headers.set("Idempotency-Key", idempotencyKey);
-  const response = await fetch(`${baseUrl}/${path.replace(/^\//, "")}`, { ...init, headers, cache: "no-store" });
-  if (response.ok) return (await response.json()) as T;
+  const response = await fetch(`${baseUrl}/${path.replace(/^\//, "")}`, { ...init, headers, cache: "no-store", signal });
+  // DELETE endpoints may intentionally return 204 without a response body.
+  // Do not attempt to parse JSON in that case; callers still receive a
+  // successful typed result and the shared contract remains consistent with
+  // the web client.
+  if (response.ok) {
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  }
   let payload: ApiErrorBody = { error: "No se pudo completar la solicitud", code: "http_error" };
   try {
     const candidate = (await response.json()) as Partial<ApiErrorBody>;
@@ -65,6 +81,7 @@ async function request<T>(path: string, init: RequestInit = {}, accessToken?: st
 export const mobileApi = {
   register(input: { email: string; password: string; full_name: string }) { return request<{ user: User; account: Account }>("/v1/auth/register", { method: "POST", body: JSON.stringify(input) }); },
   login(input: { email: string; password: string; mfa_code?: string }) { return request<Tokens>("/v1/auth/login", { method: "POST", body: JSON.stringify(input) }); },
+  refresh(refreshToken: string) { return request<Tokens>("/v1/auth/refresh", { method: "POST", body: JSON.stringify({ refresh_token: refreshToken }) }); },
   /** Builds the browser redirect URL without putting credentials in the deep link. */
   oauthStartUrl(provider: OAuthProvider, returnTo: string) { return `${baseUrl}/v1/auth/oauth/${provider}/start?return_to=${encodeURIComponent(returnTo)}`; },
   exchangeOAuth(provider: OAuthProvider, code: string, mfaCode?: string) { return request<Tokens>(`/v1/auth/oauth/${provider}/exchange`, { method: "POST", body: JSON.stringify({ code, mfa_code: mfaCode || undefined }) }); },
@@ -73,11 +90,35 @@ export const mobileApi = {
   enrollMFA(accessToken: string) { return request<MFAEnrollment>("/v1/auth/mfa/enroll", { method: "POST" }, accessToken); },
   verifyMFA(code: string, accessToken: string) { return request<MFAStatus>("/v1/auth/mfa/verify", { method: "POST", body: JSON.stringify({ code }) }, accessToken); },
   accounts(accessToken: string) { return request<{ items: Account[] }>("/v1/accounts", {}, accessToken); },
+  account(accountId: string, accessToken: string) { return request<Account>(`/v1/accounts/${encodeURIComponent(accountId)}`, {}, accessToken); },
+  createAccount(accessToken: string) { return request<Account>("/v1/accounts", { method: "POST", body: JSON.stringify({ currency: "USD" }) }, accessToken); },
+  renameAccount(accountId: string, displayName: string, accessToken: string) { return request<Account>(`/v1/accounts/${encodeURIComponent(accountId)}`, { method: "PATCH", body: JSON.stringify({ display_name: displayName }) }, accessToken); },
+  closeAccount(accountId: string, accessToken: string) { return request<void>(`/v1/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }, accessToken); },
   balance(accountId: string, accessToken: string) { return request<Balance>(`/v1/accounts/${accountId}/balance`, {}, accessToken); },
-  history(accountId: string, accessToken: string) { return request<History>(`/v1/accounts/${accountId}/transactions?limit=8`, {}, accessToken); },
-  deposit(accountId: string, amount: string, accessToken: string, key: string) { return request<Operation>(`/v1/accounts/${accountId}/deposits`, { method: "POST", body: JSON.stringify({ amount, currency: "HNL" }) }, accessToken, key); },
-  withdraw(accountId: string, amount: string, accessToken: string, key: string) { return request<Operation>(`/v1/accounts/${accountId}/withdrawals`, { method: "POST", body: JSON.stringify({ amount, currency: "HNL" }) }, accessToken, key); },
-  transfer(source: string, destination: string, amount: string, accessToken: string, key: string) { return request<Operation>("/v1/transfers", { method: "POST", body: JSON.stringify({ source_account_id: source, destination_account_id: destination, amount, currency: "HNL" }) }, accessToken, key); },
+  history(accountId: string, accessToken: string, options: { limit?: number; cursor?: string } = {}) {
+    const query = new URLSearchParams();
+    query.set("limit", String(options.limit ?? 5));
+    if (options.cursor) query.set("cursor", options.cursor);
+    return request<History>(`/v1/accounts/${accountId}/transactions?${query.toString()}`, {}, accessToken);
+  },
+  updateProfile(fullName: string, accessToken: string) {
+    return request<User>("/v1/auth/profile", { method: "PUT", body: JSON.stringify({ full_name: fullName }) }, accessToken);
+  },
+  chat(message: string, accessToken: string, accountId?: string, conversation?: MCPConversationState | null) {
+    return request<ChatResponse>("/v1/chat/messages", { method: "POST", body: JSON.stringify({ message, account_id: accountId, conversation: conversation ?? undefined }) }, accessToken);
+  },
+  prepareMCPAction(action: MCPActionRequest, accessToken: string) { return request<MCPAction>("/v1/mcp/actions", { method: "POST", body: JSON.stringify(action) }, accessToken); },
+  mcpTools(accessToken: string) { return request<MCPToolsResponse>("/v1/mcp/tools", {}, accessToken); },
+  callMCPTool(name: string, args: unknown, accessToken: string) { return request<MCPToolCallResponse>("/v1/mcp/tools/call", { method: "POST", body: JSON.stringify({ name, arguments: args }) }, accessToken); },
+  getMCPAction(actionId: string, accessToken: string) { return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}`, {}, accessToken); },
+  getPendingMCPAction(accessToken: string) { return request<{ action: MCPAction | null }>("/v1/mcp/actions/pending", {}, accessToken); },
+  confirmMCPAction(actionId: string, pin: string, accessToken: string) { const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 15000); return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}/confirm`, { method: "POST", body: JSON.stringify({ pin }) }, accessToken, undefined, controller.signal).finally(() => clearTimeout(timeout)); },
+  cancelMCPAction(actionId: string, accessToken: string) { return request<MCPAction>(`/v1/mcp/actions/${encodeURIComponent(actionId)}/cancel`, { method: "POST" }, accessToken); },
+  mcpPINStatus(accessToken: string) { return request<MCPPINStatus>("/v1/auth/mcp-pin", {}, accessToken); },
+  setMCPPIN(pin: string, accessToken: string) { return request<MCPPINStatus>("/v1/auth/mcp-pin", { method: "POST", body: JSON.stringify({ pin }) }, accessToken); },
+  deposit(accountId: string, amount: string, accessToken: string, key: string) { return request<Operation>(`/v1/accounts/${accountId}/deposits`, { method: "POST", body: JSON.stringify({ amount, currency: "USD" }) }, accessToken, key); },
+  withdraw(accountId: string, amount: string, accessToken: string, key: string) { return request<Operation>(`/v1/accounts/${accountId}/withdrawals`, { method: "POST", body: JSON.stringify({ amount, currency: "USD" }) }, accessToken, key); },
+  transfer(source: string, destination: string, amount: string, accessToken: string, key: string, confirmationPin?: string, transferType: "own" | "external" = "own") { return request<Operation>("/v1/transfers", { method: "POST", body: JSON.stringify({ source_account_id: source, destination_account_id: destination, transfer_type: transferType, amount, currency: "USD", confirmation_pin: confirmationPin || undefined }) }, accessToken, key); },
 };
 
 /** Idempotency keys are identifiers, not credentials; the fallback is for older Hermes runtimes. */
@@ -91,6 +132,6 @@ export function formatMinor(value: string): string {
   try {
     const minor = BigInt(value || "0");
     const digits = minor.toString().padStart(3, "0");
-    return `HNL ${digits.slice(0, -2)}.${digits.slice(-2)}`;
-  } catch { return "HNL 0.00"; }
+    return `USD ${digits.slice(0, -2)}.${digits.slice(-2)}`;
+  } catch { return "USD 0.00"; }
 }

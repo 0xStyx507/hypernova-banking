@@ -1,23 +1,29 @@
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useState } from "react";
-import { KeyboardAvoidingView, Linking, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, useWindowDimensions, View } from "react-native";
-import { Account, Balance, MFAEnrollment, MFAStatus, MobileApiError, OAuthProvider, OperationMode, Transaction, User, createIdempotencyKey, formatMinor, mobileApi } from "../src/api";
+import { Linking } from "react-native";
+import { useColorScheme as useNativeColorScheme } from "nativewind";
+import { Account, Balance, History, MCPAction, MFAEnrollment, MFAStatus, MobileApiError, OAuthProvider, OperationMode, User, createIdempotencyKey, mobileApi } from "../src/api";
 import { maskEmail, sanitizeMfaCode } from "../src/auth";
 import { AuthView } from "../src/components/AuthView";
 import { MFAOnboarding } from "../src/components/MFAOnboarding";
 import { MFAStatusGate } from "../src/components/MFAStatusGate";
 import { MFAVerificationView } from "../src/components/MFAVerificationView";
+import { MobileDashboard } from "../src/components/dashboard/MobileDashboard";
+import { DashboardSection } from "../src/types";
+import { currencyInputToMinor } from "../src/money";
 
 type AuthMode = "login" | "register";
 
 interface Session { accessToken: string; refreshToken: string; user: User }
 
 const sessionKey = "hypernova.mobile.session";
+const themeKey = "hypernova.mobile.theme";
+type ThemeMode = "system" | "light" | "dark";
 
 /** Mobile entry screen: authentication, balance, operations, history and MFA. */
 export default function HomeScreen() {
-  const { width } = useWindowDimensions();
-  const compact = width < 390;
+  const colorScheme = useNativeColorScheme();
+  const [themeMode, setThemeMode] = useState<ThemeMode>("system");
   const [session, setSession] = useState<Session | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authNeedsMFA, setAuthNeedsMFA] = useState(false);
@@ -27,12 +33,19 @@ export default function HomeScreen() {
   const [fullName, setFullName] = useState("");
   const [authMFA, setAuthMFA] = useState("");
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountBalances, setAccountBalances] = useState<Record<string, Balance>>({});
   const [account, setAccount] = useState<Account | null>(null);
   const [balance, setBalance] = useState<Balance | null>(null);
-  const [history, setHistory] = useState<Transaction[]>([]);
+  const [history, setHistory] = useState<History | null>(null);
+  const [historyPages, setHistoryPages] = useState<History[]>([]);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [section, setSection] = useState<DashboardSection>("accounts");
   const [mode, setMode] = useState<OperationMode>("withdrawal");
   const [amount, setAmount] = useState("");
   const [destination, setDestination] = useState("");
+  const [transferTargetType, setTransferTargetType] = useState<"own" | "external">("own");
+  const [transferConfirmationPin, setTransferConfirmationPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [mfaStatus, setMfaStatus] = useState<MFAStatus | null>(null);
@@ -41,8 +54,29 @@ export default function HomeScreen() {
   const [mfaBusy, setMfaBusy] = useState(false);
   const [mfaLoading, setMfaLoading] = useState(false);
   const [mfaCheckError, setMfaCheckError] = useState("");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountNotice, setAccountNotice] = useState("");
+  const [accountRenameBusyId, setAccountRenameBusyId] = useState("");
+  const [profileFullName, setProfileFullName] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileNotice, setProfileNotice] = useState("");
+  const [mcpPin, setMcpPin] = useState("");
+  const [mcpPinConfigured, setMcpPinConfigured] = useState(false);
+  const [mcpPinBusy, setMcpPinBusy] = useState(false);
+  const [mcpPinNotice, setMcpPinNotice] = useState("");
+  const [mcpActionPending, setMcpActionPending] = useState(false);
+  const [mcpAction, setMcpAction] = useState<MCPAction | null>(null);
 
-  useEffect(() => { void restoreSession(); }, []);
+  useEffect(() => {
+    void restoreSession();
+    void SecureStore.getItemAsync(themeKey).then((saved) => {
+      if (saved === "light" || saved === "dark" || saved === "system") setThemeMode(saved);
+    });
+  }, []);
+  useEffect(() => {
+    colorScheme.setColorScheme(themeMode);
+    void SecureStore.setItemAsync(themeKey, themeMode);
+  }, [colorScheme, themeMode]);
   useEffect(() => {
     const consumeOAuthUrl = (url: string) => {
       const query = new URL(url).searchParams;
@@ -68,14 +102,21 @@ export default function HomeScreen() {
   }, []);
   useEffect(() => { if (session) void loadMFA(session); }, [session]);
   useEffect(() => { if (session && mfaStatus?.enabled) void loadDashboard(session); }, [session, mfaStatus?.enabled]);
+  useEffect(() => { if (session && mfaStatus?.enabled) void loadMCPPIN(); }, [session, mfaStatus?.enabled]);
 
   async function restoreSession() {
     const stored = await SecureStore.getItemAsync(sessionKey);
     if (!stored) return;
     try {
       setMfaLoading(true);
-      setSession(JSON.parse(stored) as Session);
-    } catch { await SecureStore.deleteItemAsync(sessionKey); }
+      const previous = JSON.parse(stored) as Partial<Session>;
+      if (!previous.refreshToken) throw new Error("stored session has no refresh token");
+      // Rotate the refresh token while restoring a native session. This avoids
+      // trusting an expired access token and removes a stale/replayed session
+      // instead of keeping the user on a half-authenticated screen.
+      const tokens = await mobileApi.refresh(previous.refreshToken);
+      await saveSession({ accessToken: tokens.access_token, refreshToken: tokens.refresh_token, user: tokens.user });
+    } catch { await SecureStore.deleteItemAsync(sessionKey); setMfaLoading(false); }
   }
 
   async function saveSession(next: Session | null) {
@@ -109,13 +150,78 @@ export default function HomeScreen() {
   async function loadDashboard(current: Session) {
     try {
       const response = await mobileApi.accounts(current.accessToken);
-      const selected = response.items[0] ?? null;
-      setAccounts(response.items); setAccount(selected);
-      if (selected) {
-        const [nextBalance, nextHistory] = await Promise.all([mobileApi.balance(selected.id, current.accessToken), mobileApi.history(selected.id, current.accessToken)]);
-        setBalance(nextBalance); setHistory(nextHistory.items);
-      }
+      // Keep the account selected by the customer after a mutation or refresh.
+      // Falling back to the first account is only needed when the previous
+      // selection no longer exists (for example, after closing an account).
+      const selected = response.items.find((item) => item.id === account?.id) ?? response.items[0] ?? null;
+      const balanceEntries = await Promise.all(response.items.map(async (item) => { try { return [item.id, await mobileApi.balance(item.id, current.accessToken)] as const; } catch { return null; } }));
+      setAccountBalances(Object.fromEntries(balanceEntries.filter((entry): entry is readonly [string, Balance] => entry !== null)));
+      setAccounts(response.items); setAccount(selected); setProfileFullName(current.user.full_name); setHistoryPages([]); setHistoryPage(1);
+      if (selected) await loadAccountData(selected.id, current.accessToken);
     } catch (error) { setNotice(publicError(error)); }
+  }
+
+  async function loadAccountData(accountId: string, accessToken: string) {
+    const [nextBalance, nextHistory] = await Promise.all([mobileApi.balance(accountId, accessToken), mobileApi.history(accountId, accessToken)]);
+    setBalance(nextBalance); setAccountBalances((current) => ({ ...current, [accountId]: nextBalance })); setHistory(nextHistory); setHistoryPages([]); setHistoryPage(1);
+  }
+
+  async function selectAccount(accountId: string) {
+    if (!session) return;
+    const selected = accounts.find((item) => item.id === accountId) ?? null;
+    setAccount(selected); setHistory(null); setHistoryPages([]); setHistoryPage(1); setNotice("");
+    if (selected) { try { await loadAccountData(selected.id, session.accessToken); } catch (error) { setNotice(publicError(error)); } }
+  }
+
+  async function createAccount() {
+    if (!session) return;
+    setAccountBusy(true); setAccountNotice("");
+    try { const created = await mobileApi.createAccount(session.accessToken); const nextAccounts = [...accounts, created]; setAccounts(nextAccounts); setAccount(created); await loadAccountData(created.id, session.accessToken); setAccountNotice("Tu nueva cuenta USD está lista."); }
+    catch (error) { setAccountNotice(publicError(error)); }
+    finally { setAccountBusy(false); }
+  }
+
+  async function renameAccount(accountId: string, displayName: string) {
+    if (!session || displayName.trim().length < 2) { setAccountNotice("Escribe un nombre de al menos dos caracteres."); return; }
+    setAccountRenameBusyId(accountId); setAccountNotice("");
+    try { const updated = await mobileApi.renameAccount(accountId, displayName.trim(), session.accessToken); setAccounts((current) => current.map((item) => item.id === accountId ? updated : item)); setAccountNotice("Nombre de cuenta actualizado."); }
+    catch (error) { setAccountNotice(publicError(error)); }
+    finally { setAccountRenameBusyId(""); }
+  }
+
+  async function loadMCPPIN() {
+    if (!session || !mfaStatus?.enabled) return;
+    try { const status = await mobileApi.mcpPINStatus(session.accessToken); const pending = await mobileApi.getPendingMCPAction(session.accessToken); setMcpPinConfigured(status.configured); setMcpAction(pending.action); setMcpActionPending(pending.action?.status === "ready"); }
+    catch (error) { setMcpPinNotice(publicError(error)); }
+  }
+
+  async function saveMCPPIN() {
+    if (!session || !/^\d{4}$/u.test(mcpPin)) { setMcpPinNotice("El PIN debe contener exactamente cuatro dígitos."); return; }
+    setMcpPinBusy(true); setMcpPinNotice("");
+    try { await mobileApi.setMCPPIN(mcpPin, session.accessToken); setMcpPin(""); setMcpPinConfigured(true); setMcpPinNotice("PIN activo durante tres minutos."); }
+    catch (error) { setMcpPinNotice(publicError(error)); }
+    finally { setMcpPinBusy(false); }
+  }
+
+  async function nextHistory() {
+    if (!session || !account || !history?.next_cursor || historyBusy) return;
+    setHistoryBusy(true);
+    try { setHistoryPages((current) => [...current, history]); setHistory(await mobileApi.history(account.id, session.accessToken, { cursor: history.next_cursor, limit: 5 })); setHistoryPage((current) => current + 1); }
+    catch (error) { setNotice(publicError(error)); }
+    finally { setHistoryBusy(false); }
+  }
+
+  function previousHistory() {
+    if (!historyPages.length || historyBusy) return;
+    const previous = historyPages[historyPages.length - 1]; setHistoryPages((current) => current.slice(0, -1)); setHistory(previous); setHistoryPage((current) => Math.max(1, current - 1));
+  }
+
+  async function updateProfile() {
+    if (!session || profileFullName.trim().length < 2) { setProfileNotice("Escribe un nombre válido."); return; }
+    setProfileBusy(true); setProfileNotice("");
+    try { const user = await mobileApi.updateProfile(profileFullName.trim(), session.accessToken); const next = { ...session, user }; setSession(next); await SecureStore.setItemAsync(sessionKey, JSON.stringify(next)); setProfileFullName(user.full_name); setProfileNotice("Tus datos fueron actualizados."); }
+    catch (error) { setProfileNotice(publicError(error)); }
+    finally { setProfileBusy(false); }
   }
 
   async function loadMFA(current: Session) {
@@ -138,13 +244,15 @@ export default function HomeScreen() {
 
   async function submitOperation() {
     if (!session || !account || !amount) return;
+    const minorAmount = currencyInputToMinor(amount);
+    if (!minorAmount || minorAmount === "0") { setNotice("Escribe un monto válido mayor que USD 0.00."); return; }
     setBusy(true); setNotice("");
     try {
       const key = createIdempotencyKey();
-      if (mode === "deposit") await mobileApi.deposit(account.id, amount, session.accessToken, key);
-      if (mode === "withdrawal") await mobileApi.withdraw(account.id, amount, session.accessToken, key);
-      if (mode === "transfer") await mobileApi.transfer(account.id, destination, amount, session.accessToken, key);
-      setAmount(""); setDestination(""); setNotice("Operación registrada correctamente."); await loadDashboard(session);
+      if (mode === "deposit") await mobileApi.deposit(account.id, minorAmount, session.accessToken, key);
+      if (mode === "withdrawal") await mobileApi.withdraw(account.id, minorAmount, session.accessToken, key);
+      if (mode === "transfer") await mobileApi.transfer(account.id, destination, minorAmount, session.accessToken, key, transferTargetType === "external" ? transferConfirmationPin : undefined, transferTargetType);
+      setAmount(""); setDestination(""); setTransferConfirmationPin(""); setNotice("Operación registrada correctamente."); await loadDashboard(session);
     } catch (error) { setNotice(publicError(error)); } finally { setBusy(false); }
   }
 
@@ -166,7 +274,16 @@ export default function HomeScreen() {
 
   async function logout() {
     await mobileApi.logout(session?.accessToken ?? "").catch(() => undefined);
-    await saveSession(null); setAccounts([]); setAccount(null); setBalance(null); setHistory([]); setMfaCode(""); setMfaLoading(false);
+    await saveSession(null); setAccounts([]); setAccountBalances({}); setAccount(null); setBalance(null); setHistory(null); setHistoryPages([]); setHistoryPage(1); setMfaCode(""); setMfaLoading(false); setSection("accounts"); setMcpPin(""); setMcpPinConfigured(false); setMcpPinNotice(""); setMcpActionPending(false); setMcpAction(null);
+  }
+
+  function navigateDashboard(nextSection: DashboardSection) {
+    if (mcpActionPending && nextSection === "operations" && section !== "operations") {
+      setNotice("Tienes una operación pendiente en el asistente. Confírmala o cancélala antes de iniciar otra.");
+      return;
+    }
+    setNotice("");
+    setSection(nextSection);
   }
 
   if (!session && (authNeedsMFA || oauthPending)) return <MFAVerificationView accountLabel={email ? maskEmail(email) : "tu cuenta"} code={authMFA} busy={busy} notice={notice} onCodeChange={(value) => { setAuthMFA(sanitizeMfaCode(value)); setNotice(""); }} onSubmit={authenticate} onBack={() => { setAuthNeedsMFA(false); setOauthPending(null); setAuthMFA(""); setNotice(""); }} />;
@@ -177,23 +294,25 @@ export default function HomeScreen() {
 
   if (!mfaStatus.enabled) return <MFAOnboarding user={session.user} enrollment={mfaEnrollment} code={mfaCode} busy={mfaBusy} loading={mfaLoading} notice={notice} onCodeChange={setMfaCode} onBegin={beginMFA} onVerify={verifyMFA} onLogout={logout} />;
 
-  return <SafeAreaView className="flex-1 bg-[#f7f9fb]"><KeyboardAvoidingView className="flex-1" behavior={Platform.OS === "ios" ? "padding" : undefined}><ScrollView contentContainerStyle={{ paddingBottom: 48, maxWidth: 720, width: "100%", alignSelf: "center" }} className={compact ? "px-4 pt-6" : "px-5 pt-8"}>
-    <View className="flex-row items-center justify-between"><View><Text className="text-xs font-semibold uppercase tracking-[3px] text-slate-500">Hypernova · Resumen</Text><Text className="mt-2 text-3xl font-semibold text-[#2d73a5]">Hola, {session.user.full_name.split(" ")[0]}.</Text><Text className="mt-2 text-sm text-slate-500">Tu posición y actividad reciente.</Text></View><View className="items-end"><Text className="mb-2 rounded-full bg-[#dff7f3] px-3 py-1 text-xs font-bold text-[#087e78]">MFA activo</Text><Pressable accessibilityRole="button" onPress={logout}><Text className="font-semibold text-slate-500">Salir</Text></Pressable></View></View>
-    <View className="mt-7 rounded-3xl bg-[#2d73a5] p-7"><View className="flex-row items-start justify-between"><View><Text className="text-sm text-slate-300">Saldo disponible</Text><Text className={compact ? "mt-4 text-4xl font-semibold text-white" : "mt-4 text-5xl font-semibold text-white"}>{formatMinor(balance?.available_balance ?? "0")}</Text></View><Text className="rounded-full bg-white/10 px-3 py-1 text-xs font-bold text-white">HNL</Text></View><Text className="mt-4 text-xs text-slate-400">Fondos disponibles · cuenta protegida</Text></View>
-    <View className="mt-5 rounded-3xl bg-white p-5"><Text className="text-xs font-bold uppercase tracking-[2px] text-slate-400">Operar</Text><View className="mt-4 flex-row gap-2">{(["withdrawal", "transfer", "deposit"] as OperationMode[]).map((item) => <Pressable key={item} accessibilityRole="button" className={`flex-1 rounded-full px-2 py-3 ${mode === item ? "bg-[#2d73a5]" : "bg-slate-100"}`} onPress={() => { setMode(item); setNotice(""); }}><Text className={`text-center text-xs font-bold ${mode === item ? "text-white" : "text-slate-500"}`}>{item === "withdrawal" ? "Retirar" : item === "transfer" ? "Transferir" : "Depositar"}</Text></Pressable>)}</View><TextInput className="mt-5 rounded-2xl bg-slate-100 px-4 py-4" keyboardType="number-pad" value={amount} onChangeText={(value) => setAmount(value.replace(/\D/g, ""))} placeholder="Importe en unidades menores" accessibilityLabel="Importe" /><TextInput className="mt-3 rounded-2xl bg-slate-100 px-4 py-4" style={{ display: mode === "transfer" ? "flex" : "none" }} value={destination} onChangeText={setDestination} placeholder="UUID de cuenta destino" autoCapitalize="none" accessibilityLabel="Cuenta destino" /><Pressable className="mt-4 rounded-full bg-[#16c1b5] px-5 py-4" disabled={busy} onPress={submitOperation}><Text className="text-center font-semibold text-[#2d73a5]">{busy ? "Procesando…" : "Confirmar operación"}</Text></Pressable></View>
-    {notice ? <Text accessibilityRole="alert" className="mt-4 rounded-2xl bg-amber-50 p-4 text-sm text-amber-800">{notice}</Text> : null}
-    <View className="mt-5 rounded-3xl bg-white p-5"><View className="flex-row items-center justify-between"><View><Text className="text-xs font-bold uppercase tracking-[2px] text-slate-400">Actividad</Text><Text className="mt-2 text-xl font-semibold text-[#2d73a5]">Historial reciente</Text></View><Text className="text-xs text-slate-400">{accounts.length} cuenta{accounts.length === 1 ? "" : "s"}</Text></View>{history.length === 0 ? <Text className="mt-4 text-slate-500">No hay movimientos recientes.</Text> : history.map((item) => <View className="flex-row items-center justify-between border-b border-slate-100 py-4" key={`${item.transfer_id}-${item.created_at}`}><View><Text className="font-semibold text-[#2d73a5]">{item.type}</Text><Text className="mt-1 text-xs text-slate-400">{new Date(item.created_at).toLocaleString("es-PA")}</Text></View><Text className="font-semibold text-[#2d73a5]">{item.direction === "credit" ? "+" : "−"}{formatMinor(item.amount)}</Text></View>)}</View>
-    <Text className="mt-6 text-center text-xs text-slate-400">Tokens protegidos por SecureStore · importes en unidades menores</Text>
-  </ScrollView></KeyboardAvoidingView></SafeAreaView>;
+  return <MobileDashboard themeMode={themeMode} onThemeModeChange={setThemeMode} user={session.user} accessToken={session.accessToken} accounts={accounts} accountBalances={accountBalances} activeAccount={account} balance={balance} history={history} historyPage={historyPage} historyBusy={historyBusy} hasMoreHistory={Boolean(history?.has_more)} section={section} operationMode={mode} operationAmount={amount} destinationAccountId={destination} transferTargetType={transferTargetType} transferConfirmationPin={transferConfirmationPin} operationBusy={busy} notice={notice} accountBusy={accountBusy} accountNotice={accountNotice} accountRenameBusyId={accountRenameBusyId} profileFullName={profileFullName || session.user.full_name} profileBusy={profileBusy} profileNotice={profileNotice} mcpPin={mcpPin} mcpPinConfigured={mcpPinConfigured} mcpPinBusy={mcpPinBusy} mcpPinNotice={mcpPinNotice} mcpActionPending={mcpActionPending} mcpAction={mcpAction} onNavigate={navigateDashboard} onAccountChange={(accountId) => { void selectAccount(accountId); }} onCreateAccount={() => { void createAccount(); }} onRenameAccount={(accountId, name) => { void renameAccount(accountId, name); }} onOperationModeChange={(nextMode) => { setMode(nextMode); setNotice(""); }} onAmountChange={setAmount} onDestinationChange={setDestination} onTransferTargetTypeChange={(target) => { setTransferTargetType(target); setDestination(""); setTransferConfirmationPin(""); }} onTransferConfirmationPinChange={(pin) => setTransferConfirmationPin(pin)} onOperation={() => { void submitOperation(); }} onNextHistory={() => { void nextHistory(); }} onPreviousHistory={previousHistory} onProfileNameChange={setProfileFullName} onProfileSubmit={() => { void updateProfile(); }} onMCPPINChange={(pin) => setMcpPin(pin.replace(/\D/g, "").slice(0, 4))} onSetMCPPIN={() => { void saveMCPPIN(); }} onLogout={() => { void logout(); }} onMCPActionPendingChange={setMcpActionPending} onMCPActionExpired={() => { setMcpAction(null); setMcpActionPending(false); setNotice("La operación pendiente expiró. Puedes iniciar otra operación."); }} onMCPActionConfirmed={(action) => { setMcpAction(action); setMcpActionPending(false); const accountID = action.payload.account_id || action.payload.source_account_id; const selected = accountID ? accounts.find((item) => item.id === accountID) : undefined; if (selected && session) { setAccount(selected); void loadAccountData(selected.id, session.accessToken).then(() => new Promise((resolve) => setTimeout(resolve, 250))).then(() => loadAccountData(selected.id, session.accessToken)); } else if (session) void loadDashboard(session); }} />;
 }
 
 
 function publicError(error: unknown): string {
-  if (error instanceof MobileApiError) {
+    if (error instanceof MobileApiError) {
     if (error.body.code === "insufficient_funds") return "Fondos insuficientes.";
     if (error.body.code === "demo_deposit_disabled") return "El depósito demo está desactivado en este entorno.";
     if (error.body.code === "mfa_required") return "Escribe el código de tu autenticador para continuar.";
     if (error.body.code === "mfa_invalid_code") return "El código MFA no es válido o expiró.";
+    if (error.body.code === "mcp_pin_error" || error.body.code === "mcp_pin_unavailable") return "No pudimos guardar tu PIN de confirmación. Inténtalo nuevamente.";
+    if (error.body.code === "mcp_pin_not_configured") return "Configura tu PIN en Ajustes antes de confirmar una operación.";
+    if (error.body.code === "mcp_pin_expired") return "Tu PIN venció. Genera uno nuevo en Ajustes.";
+    if (error.body.code === "mcp_pin_invalid") return "El PIN no coincide. Revísalo e inténtalo nuevamente.";
+    if (error.body.code === "external_account_not_found") return "No encontramos la cuenta destino.";
+    if (error.body.code === "account_not_found") return "La cuenta seleccionada no está disponible. Actualiza tus cuentas e inténtalo nuevamente.";
+    if (error.body.code === "external_transfer_pin_required") return "Escribe tu PIN para transferir a otra cuenta.";
+    if (error.body.code === "invalid_transfer_type") return "Selecciona un tipo de transferencia válido.";
+    if (error.body.code === "invalid_currency") return "Las cuentas Hyper Bank usan USD.";
     return error.body.error;
   }
   return "No pudimos completar la solicitud.";

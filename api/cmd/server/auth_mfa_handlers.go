@@ -39,7 +39,15 @@ func (h authHandler) mfaVerify(w http.ResponseWriter, r *http.Request) {
 		writeMFAError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": true})
+	// Return the complete public MFA contract after verification. Keeping the
+	// response aligned with MFAStatus avoids clients having to infer whether
+	// enrollment actually completed from the `enabled` flag alone.
+	status, err := h.service.MFAStatus(r.Context(), authenticatedUser(r))
+	if err != nil {
+		writeMFAError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func writeMFAError(w http.ResponseWriter, err error) {

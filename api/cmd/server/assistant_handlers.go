@@ -8,10 +8,13 @@ import (
 
 	"github.com/hypernova-banking/api/internal/assistant"
 	"github.com/hypernova-banking/api/internal/auth"
+	"github.com/hypernova-banking/api/internal/mcp"
 )
 
 type chatRequest struct {
-	Message string `json:"message"`
+	Message           string                       `json:"message"`
+	SelectedAccountID string                       `json:"account_id,omitempty"`
+	Conversation      *assistant.ConversationState `json:"conversation,omitempty"`
 }
 
 type assistantHandler struct{ service *assistant.Service }
@@ -35,10 +38,15 @@ func (h assistantHandler) message(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, "invalid_chat_request", "invalid chat request")
 		return
 	}
-	response, err := h.service.Chat(r.Context(), bearerToken(r.Header.Get("Authorization")), request.Message)
+	response, err := h.service.Chat(r.Context(), bearerToken(r.Header.Get("Authorization")), request.Message, request.SelectedAccountID, request.Conversation)
 	if err != nil {
 		if errors.Is(err, assistant.ErrInvalidMessage) {
 			writeErrorCode(w, http.StatusBadRequest, "invalid_chat_message", "message must contain between 1 and 2000 characters")
+			return
+		}
+		var toolError *mcp.ToolError
+		if errors.As(err, &toolError) {
+			writeErrorCode(w, toolError.Status, toolError.Code, toolError.Message)
 			return
 		}
 		writeErrorCode(w, http.StatusBadGateway, "assistant_unavailable", "assistant temporarily unavailable")

@@ -1,5 +1,20 @@
+param(
+  [string]$Fixture = "$(Join-Path (Get-Location) 'datos-prueba-HNL.json')"
+)
+
 $ErrorActionPreference = "Stop"
 
-# The fixture is mounted read-only in the API container; the seed command
-# hashes passwords and imports only identity data during phase 1.
-docker compose exec -T api /app/seed --file /seed/datos-prueba-HNL.json
+if (-not (Test-Path -LiteralPath $Fixture -PathType Leaf)) {
+  throw "Fixture not found: $Fixture"
+}
+
+# Fixtures stay outside the image and are copied only for this explicit local
+# operation. The seed command hashes passwords and imports identity data.
+$containerFixture = "/tmp/$(Split-Path -Leaf $Fixture)"
+docker compose cp --quiet $Fixture "api:$containerFixture"
+try {
+  docker compose exec -T api /app/seed --file $containerFixture
+}
+finally {
+  docker compose exec -T api sh -c "rm -f '$containerFixture'" | Out-Null
+}

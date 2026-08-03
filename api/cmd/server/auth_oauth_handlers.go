@@ -72,7 +72,7 @@ func (h authHandler) oauthCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		metadata := requestMetadata(r)
-		account, accountErr := h.ledgerService.CreateAccount(ctx, result.User.ID, "HNL", ledger.RequestMetadata{IPAddress: metadata.IPAddress, UserAgent: metadata.UserAgent})
+		account, accountErr := h.ledgerService.CreateAccount(ctx, result.User.ID, "USD", ledger.RequestMetadata{IPAddress: metadata.IPAddress, UserAgent: metadata.UserAgent})
 		if accountErr != nil {
 			writeLedgerError(w, accountErr)
 			return

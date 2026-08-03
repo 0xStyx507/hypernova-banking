@@ -1,8 +1,12 @@
 name: CI
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 permissions:
@@ -12,6 +16,7 @@ jobs:
   api:
     name: API tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: api
@@ -27,6 +32,7 @@ jobs:
   web:
     name: Web lint and build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: web
@@ -41,19 +47,60 @@ jobs:
       - run: npm run lint
       - run: npm run build
 
-  compose:
-    name: Compose validation
+  mobile:
+    name: Mobile typecheck
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose config --quiet
-
-  contract:
-    name: OpenAPI contract
-    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: mobile
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npx --yes @redocly/cli lint docs/openapi.yaml
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      # Expo Router currently declares optional peer packages that are not
+      # needed by the native build. Keep CI aligned with the mobile image.
+      - run: npm ci --legacy-peer-deps
+      - run: npm run typecheck
+
+  compose:
+    name: Compose validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+      - run: docker compose build api web mobile tigerbeetle
+
+  contract:
+    name: OpenAPI contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npx --yes @redocly/cli lint openapi.yaml
+
+  security:
+    name: Filesystem security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan dependencies, secrets and configuration
+        uses: aquasecurity/trivy-action@0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          version: v0.70.0
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          skip-dirs: .git,node_modules,dist,build,coverage
+          timeout: 10m0s
+          exit-code: 1

@@ -35,7 +35,7 @@ func (h authHandler) register(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusServiceUnavailable, "ledger_unavailable", "financial ledger unavailable")
 		return
 	}
-	account, err := h.ledgerService.CreateAccount(ctx, user.ID, "HNL", ledger.RequestMetadata{IPAddress: metadata.IPAddress, UserAgent: metadata.UserAgent})
+	account, err := h.ledgerService.CreateAccount(ctx, user.ID, "USD", ledger.RequestMetadata{IPAddress: metadata.IPAddress, UserAgent: metadata.UserAgent})
 	if err != nil {
 		writeLedgerError(w, err)
 		return
@@ -68,6 +68,13 @@ func (h authHandler) login(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "login failed")
 		}
 		return
+	}
+	if h.ledgerService != nil {
+		metadata := requestMetadata(r)
+		if _, accountErr := h.ledgerService.EnsureInitialAccount(ctx, tokens.User.ID, ledger.RequestMetadata{IPAddress: metadata.IPAddress, UserAgent: metadata.UserAgent}); accountErr != nil {
+			writeLedgerError(w, accountErr)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, tokensResponseFrom(tokens))
 }

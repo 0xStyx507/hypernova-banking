@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/tigerbeetle/tigerbeetle-go/pkg/types"
+	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 )
 
 func TestParseMinorAmountRejectsUnsafeValues(t *testing.T) {
@@ -31,11 +31,11 @@ func TestDemoDepositRequiresExplicitConfiguration(t *testing.T) {
 }
 
 func TestHashRequestChangesWithFinancialIntent(t *testing.T) {
-	debit := types.ToUint128(10)
-	credit := types.ToUint128(20)
-	first := hashRequest("transfer", debit, credit, 100, "HNL")
-	retry := hashRequest("transfer", debit, credit, 100, "HNL")
-	differentAmount := hashRequest("transfer", debit, credit, 101, "HNL")
+	debit := tigerbeetle.ToUint128(10)
+	credit := tigerbeetle.ToUint128(20)
+	first := hashRequest("transfer", debit, credit, 100, "USD")
+	retry := hashRequest("transfer", debit, credit, 100, "USD")
+	differentAmount := hashRequest("transfer", debit, credit, 101, "USD")
 	if !bytes.Equal(first, retry) {
 		t.Fatal("same financial intent must produce the same request hash")
 	}
@@ -44,11 +44,33 @@ func TestHashRequestChangesWithFinancialIntent(t *testing.T) {
 	}
 }
 
-func TestNormalizeCurrencyDefaultsToHNL(t *testing.T) {
-	if got, err := normalizeCurrency(""); err != nil || got != "HNL" {
-		t.Fatalf("expected HNL default, got %q, %v", got, err)
+func TestNormalizeCurrencyDefaultsToUSD(t *testing.T) {
+	if got, err := normalizeCurrency(""); err != nil || got != "USD" {
+		t.Fatalf("expected USD default, got %q, %v", got, err)
 	}
-	if _, err := normalizeCurrency("USD"); err == nil {
+	if _, err := normalizeCurrency("HNL"); err == nil {
 		t.Fatal("expected unsupported currency to be rejected")
+	}
+}
+
+func TestNormalizeTransferScopeDefaultsToOwn(t *testing.T) {
+	if got, err := NormalizeTransferScope(""); err != nil || got != TransferScopeOwn {
+		t.Fatalf("expected own default, got %q, %v", got, err)
+	}
+	if got, err := NormalizeTransferScope("EXTERNAL"); err != nil || got != TransferScopeExternal {
+		t.Fatalf("expected external scope, got %q, %v", got, err)
+	}
+	if _, err := NormalizeTransferScope("beneficiary"); err != ErrInvalidInput {
+		t.Fatalf("expected invalid transfer scope, got %v", err)
+	}
+}
+
+func TestTransferScopeChangesIdempotencyIntent(t *testing.T) {
+	debit := tigerbeetle.ToUint128(10)
+	credit := tigerbeetle.ToUint128(20)
+	own := hashRequestWithScope("transfer", debit, credit, 100, "USD", "own")
+	external := hashRequestWithScope("transfer", debit, credit, 100, "USD", "external")
+	if bytes.Equal(own, external) {
+		t.Fatal("own and external transfer intents must not share a request hash")
 	}
 }

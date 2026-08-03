@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/tigerbeetle/tigerbeetle-go/pkg/types"
+	tigerbeetle "github.com/tigerbeetle/tigerbeetle-go"
 )
 
 // OperationView is the stable response returned by all posted movements.
@@ -31,7 +31,7 @@ func (s *Service) Deposit(ctx context.Context, userID uuid.UUID, accountID, amou
 	if err != nil {
 		return OperationView{}, err
 	}
-	return s.execute(ctx, userID, "deposit", account, systemAccountID(s.currency), amount, key, metadata)
+	return s.execute(ctx, userID, "deposit", account, systemAccountID(s.currency), amount, key, metadata, "")
 }
 
 // Withdraw debits a user account to the controlled system account. The
@@ -41,23 +41,59 @@ func (s *Service) Withdraw(ctx context.Context, userID uuid.UUID, accountID, amo
 	if err != nil {
 		return OperationView{}, err
 	}
-	return s.execute(ctx, userID, "withdrawal", account, systemAccountID(s.currency), amount, key, metadata)
+	return s.execute(ctx, userID, "withdrawal", account, systemAccountID(s.currency), amount, key, metadata, "")
 }
 
-// Transfer moves funds from an owned account to another active account.
+// Transfer preserves the original API behavior: transfers are between the
+// authenticated user's own accounts.
 func (s *Service) Transfer(ctx context.Context, userID uuid.UUID, fromID, toID, amount, key string, metadata RequestMetadata) (OperationView, error) {
-	from, err := s.accountForUser(ctx, userID, fromID)
+	return s.TransferWithScope(ctx, userID, fromID, toID, amount, key, string(TransferScopeOwn), metadata)
+}
+
+// TransferWithScope validates whether the destination is an own account or an
+// active account belonging to another user before entering the idempotent
+// TigerBeetle execution path.
+func (s *Service) TransferWithScope(ctx context.Context, userID uuid.UUID, fromID, toID, amount, key, requestedScope string, metadata RequestMetadata) (OperationView, error) {
+	scope, from, to, err := s.transferAccounts(ctx, userID, fromID, toID, requestedScope)
 	if err != nil {
 		return OperationView{}, err
+	}
+	return s.execute(ctx, userID, "transfer", from, mustTigerID(to.tigerID), amount, key, metadata, string(scope), to)
+}
+
+// ValidateTransferTarget checks the destination before a caller collects a
+// confirmation PIN. It does not reserve idempotency state or touch the ledger.
+func (s *Service) ValidateTransferTarget(ctx context.Context, userID uuid.UUID, fromID, toID, requestedScope string) error {
+	_, _, _, err := s.transferAccounts(ctx, userID, fromID, toID, requestedScope)
+	return err
+}
+
+func (s *Service) transferAccounts(ctx context.Context, userID uuid.UUID, fromID, toID, requestedScope string) (TransferScope, accountRecord, accountRecord, error) {
+	scope, err := NormalizeTransferScope(requestedScope)
+	if err != nil {
+		return "", accountRecord{}, accountRecord{}, err
+	}
+	from, err := s.accountForUser(ctx, userID, fromID)
+	if err != nil {
+		return "", accountRecord{}, accountRecord{}, err
 	}
 	to, err := s.accountByPublicID(ctx, toID)
 	if err != nil {
-		return OperationView{}, err
+		return "", accountRecord{}, accountRecord{}, err
 	}
-	if from.tigerID == to.tigerID || to.status != "active" {
-		return OperationView{}, ErrInvalidInput
+	if from.tigerID == to.tigerID || from.currency != to.currency {
+		return "", accountRecord{}, accountRecord{}, ErrInvalidInput
 	}
-	return s.execute(ctx, userID, "transfer", from, mustTigerID(to.tigerID), amount, key, metadata, to)
+	if to.status != "active" {
+		return "", accountRecord{}, accountRecord{}, ErrNotFound
+	}
+	if scope == TransferScopeOwn && to.ownerID != userID {
+		return "", accountRecord{}, accountRecord{}, ErrNotFound
+	}
+	if scope == TransferScopeExternal && to.ownerID == userID {
+		return "", accountRecord{}, accountRecord{}, ErrInvalidInput
+	}
+	return scope, from, to, nil
 }
 
 // HistoryView contains immutable TigerBeetle transfer facts plus the local
@@ -81,12 +117,12 @@ func (s *Service) History(ctx context.Context, userID uuid.UUID, publicAccountID
 		limit = 50
 	}
 	tbID := mustTigerID(account.tigerID)
-	filter := types.AccountFilter{
+	filter := tigerbeetle.AccountFilter{
 		AccountID: tbID,
 		// Read one sentinel row so the HTTP adapter can expose an accurate
 		// has_more value instead of guessing when a page is exactly full.
 		Limit: limit + 1,
-		Flags: types.AccountFilterFlags{
+		Flags: tigerbeetle.AccountFilterFlags{
 			Debits:   true,
 			Credits:  true,
 			Reversed: true,
@@ -129,7 +165,7 @@ func (s *Service) History(ctx context.Context, userID uuid.UUID, publicAccountID
 // execute is the single financial execution path for deposits, withdrawals
 // and transfers. It validates the request, reserves idempotency state, calls
 // TigerBeetle and delegates durable outcome handling to operation persistence.
-func (s *Service) execute(ctx context.Context, userID uuid.UUID, operationType string, from accountRecord, to types.Uint128, amount, key string, metadata RequestMetadata, destinations ...accountRecord) (OperationView, error) {
+func (s *Service) execute(ctx context.Context, userID uuid.UUID, operationType string, from accountRecord, to tigerbeetle.Uint128, amount, key string, metadata RequestMetadata, intentScope string, destinations ...accountRecord) (OperationView, error) {
 	minor, err := parseMinorAmount(amount)
 	if err != nil || strings.TrimSpace(key) == "" || len(key) > 128 {
 		return OperationView{}, ErrInvalidInput
@@ -142,7 +178,7 @@ func (s *Service) execute(ctx context.Context, userID uuid.UUID, operationType s
 	if operationType == "transfer" && len(destinations) == 0 {
 		return OperationView{}, ErrInvalidInput
 	}
-	requestHash := hashRequest(operationType, debitID, creditID, minor, from.currency)
+	requestHash := hashRequestWithScope(operationType, debitID, creditID, minor, from.currency, intentScope)
 	operation, replay, err := s.startOperation(ctx, userID, key, requestHash, operationType, debitID.String(), creditID.String(), minor, from.currency)
 	if err != nil {
 		return OperationView{}, err
@@ -162,25 +198,25 @@ func (s *Service) execute(ctx context.Context, userID uuid.UUID, operationType s
 	if s.client == nil {
 		return s.markOperationUnknown(ctx, operation, metadata)
 	}
-	transfer := types.Transfer{
+	transfer := tigerbeetle.Transfer{
 		ID:              mustTigerID(operation.transferID),
 		DebitAccountID:  debitID,
 		CreditAccountID: creditID,
-		Amount:          types.ToUint128(uint64(minor)),
+		Amount:          tigerbeetle.ToUint128(uint64(minor)),
 		Ledger:          ledgerCode,
 		Code:            transferCode,
 	}
-	results, err := s.client.CreateTransfers([]types.Transfer{transfer})
+	results, err := s.client.CreateTransfers([]tigerbeetle.Transfer{transfer})
 	if err != nil {
 		return s.markOperationUnknown(ctx, operation, metadata)
 	}
 	for _, result := range results {
-		switch result.Result {
-		case types.TransferOK:
+		switch result.Status {
+		case tigerbeetle.TransferCreated:
 			return s.completeOperation(ctx, operation, metadata)
-		case types.TransferExists:
+		case tigerbeetle.TransferExists:
 			return s.reconcileExistingTransfer(ctx, operation, transfer, metadata)
-		case types.TransferExceedsCredits, types.TransferExceedsDebits:
+		case tigerbeetle.TransferExceedsCredits, tigerbeetle.TransferExceedsDebits:
 			return s.failOperation(ctx, operation, "insufficient_funds", metadata)
 		default:
 			return s.failOperation(ctx, operation, "ledger_rejected", metadata)
@@ -191,7 +227,7 @@ func (s *Service) execute(ctx context.Context, userID uuid.UUID, operationType s
 
 type transferIndex struct{ operationType string }
 
-func (s *Service) transferMetadata(ctx context.Context, transfers []types.Transfer) map[string]transferIndex {
+func (s *Service) transferMetadata(ctx context.Context, transfers []tigerbeetle.Transfer) map[string]transferIndex {
 	ids := make([]string, 0, len(transfers))
 	for _, transfer := range transfers {
 		ids = append(ids, transfer.ID.String())
