@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.0
 	github.com/tigerbeetle/tigerbeetle-go v0.17.9
-	golang.org/x/crypto v0.43.0
+	golang.org/x/crypto v0.52.0
 )
 
 require (
