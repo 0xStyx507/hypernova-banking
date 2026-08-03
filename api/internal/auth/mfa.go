@@ -41,6 +41,7 @@ var (
 	ErrMFAEnrollmentRequired = errors.New("multi-factor authentication enrollment required")
 	ErrMFAEnrollmentExpired  = errors.New("multi-factor authentication enrollment expired")
 	ErrMFAAlreadyEnabled     = errors.New("multi-factor authentication already enabled")
+	ErrMFALocked             = errors.New("multi-factor authentication temporarily locked")
 	ErrMFAUnavailable        = errors.New("multi-factor authentication unavailable")
 )
 
@@ -277,10 +278,54 @@ func (s *Service) verifyLoginMFA(ctx context.Context, userID uuid.UUID, encrypte
 	if len(s.mfaKey) != 32 {
 		return ErrMFAUnavailable
 	}
-	secret, err := decryptMFASecret(s.mfaKey, encrypted)
-	if err != nil || !VerifyTOTP(secret, code, time.Now().UTC()) {
-		_ = audit.Record(ctx, s.pool, &userID, "login_mfa_failure", nil, metadata.IPAddress, metadata.UserAgent)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin MFA login verification: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var failedAttempts int
+	var lockedUntil *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT mfa_failed_attempts, mfa_locked_until
+		FROM users WHERE id = $1 AND active FOR UPDATE
+	`, userID).Scan(&failedAttempts, &lockedUntil); err != nil {
+		return fmt.Errorf("read MFA login lockout: %w", err)
+	}
+	now := time.Now().UTC()
+	if lockedUntil != nil && now.Before(*lockedUntil) {
+		return ErrMFALocked
+	}
+	secret, decryptErr := decryptMFASecret(s.mfaKey, encrypted)
+	if decryptErr != nil || !VerifyTOTP(secret, code, now) {
+		failedAttempts++
+		var nextLockedUntil *time.Time
+		if failedAttempts >= 5 {
+			lockUntil := now.Add(15 * time.Minute)
+			nextLockedUntil = &lockUntil
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE users SET mfa_failed_attempts = $1, mfa_locked_until = $2, updated_at = NOW()
+			WHERE id = $3
+		`, failedAttempts, nextLockedUntil, userID); err != nil {
+			return fmt.Errorf("record MFA login failure: %w", err)
+		}
+		_ = audit.Record(ctx, tx, &userID, "login_mfa_failure", nil, metadata.IPAddress, metadata.UserAgent)
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit MFA login failure: %w", err)
+		}
+		if nextLockedUntil != nil {
+			return ErrMFALocked
+		}
 		return ErrInvalidMFACode
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE users SET mfa_failed_attempts = 0, mfa_locked_until = NULL, updated_at = NOW()
+		WHERE id = $1
+	`, userID); err != nil {
+		return fmt.Errorf("reset MFA login failures: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit MFA login verification: %w", err)
 	}
 	return nil
 }

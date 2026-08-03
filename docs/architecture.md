@@ -46,7 +46,7 @@ microservicios ni añadir infraestructura no requerida.
 
 ## Flujo financiero
 
-Los importes públicos son cadenas de unidades menores enteras y solo HNL está
+Los importes públicos son cadenas de unidades menores enteras y solo USD está
 habilitado. Toda mutación usa `Idempotency-Key`; el API conserva el mismo ID de
 transferencia para reconciliar respuestas inciertas. El cliente no realiza
 pre-chequeos de saldo que puedan introducir una carrera: TigerBeetle aplica la
@@ -69,7 +69,7 @@ fondeo autorizado.
 
 ## Contratos y seguridad
 
-La superficie pública se mantiene en [`openapi.yaml`](openapi.yaml), que es
+La superficie pública se mantiene en [`openapi.yaml`](../openapi.yaml), que es
 compartida por API, web, mobile y clientes MCP. El baseline mínimo de
 seguridad se encuentra en
 [`compliance/iso-27001-baseline.md`](compliance/iso-27001-baseline.md).

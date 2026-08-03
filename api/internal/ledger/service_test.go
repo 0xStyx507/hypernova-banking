@@ -44,6 +44,18 @@ func TestHashRequestChangesWithFinancialIntent(t *testing.T) {
 	}
 }
 
+func TestHashAccountCreationIsStableAndCurrencyBound(t *testing.T) {
+	first := hashAccountCreation("USD")
+	retry := hashAccountCreation("USD")
+	differentCurrency := hashAccountCreation("EUR")
+	if !bytes.Equal(first, retry) {
+		t.Fatal("same account creation intent must produce the same request hash")
+	}
+	if bytes.Equal(first, differentCurrency) {
+		t.Fatal("different account currencies must produce different request hashes")
+	}
+}
+
 func TestNormalizeCurrencyDefaultsToUSD(t *testing.T) {
 	if got, err := normalizeCurrency(""); err != nil || got != "USD" {
 		t.Fatalf("expected USD default, got %q, %v", got, err)
@@ -72,5 +84,31 @@ func TestTransferScopeChangesIdempotencyIntent(t *testing.T) {
 	external := hashRequestWithScope("transfer", debit, credit, 100, "USD", "external")
 	if bytes.Equal(own, external) {
 		t.Fatal("own and external transfer intents must not share a request hash")
+	}
+}
+
+func TestSameTransferRejectsChangedFinancialIntent(t *testing.T) {
+	transfer := tigerbeetle.Transfer{
+		ID:              tigerbeetle.ToUint128(1),
+		DebitAccountID:  tigerbeetle.ToUint128(10),
+		CreditAccountID: tigerbeetle.ToUint128(20),
+		Amount:          tigerbeetle.ToUint128(100),
+		Ledger:          ledgerCode,
+		Code:            transferCode,
+	}
+	if !sameTransfer(transfer, transfer) {
+		t.Fatal("identical transfers must match")
+	}
+	changed := transfer
+	changed.Amount = tigerbeetle.ToUint128(101)
+	if sameTransfer(transfer, changed) {
+		t.Fatal("a changed amount must not match the original transfer")
+	}
+}
+
+func TestReconcilePendingOperationsRequiresInfrastructure(t *testing.T) {
+	service := NewService(nil, nil)
+	if _, err := service.ReconcilePendingOperations(context.Background()); err != ErrLedgerUnavailable {
+		t.Fatalf("expected ledger unavailable, got %v", err)
 	}
 }

@@ -17,7 +17,7 @@ import (
 
 func main() {
 	databaseURL := flag.String("database-url", os.Getenv("DATABASE_URL"), "PostgreSQL connection URL")
-	fixturePath := flag.String("file", "../datos-prueba-HNL.json", "development fixture path")
+	fixturePath := flag.String("file", "../datos-prueba.json", "development fixture path")
 	bcryptCost := flag.Int("bcrypt-cost", bcrypt.DefaultCost, "bcrypt cost for new seed users")
 	duplicateReportPath := flag.String("duplicates-report", "", "optional safe JSON report path for duplicate emails")
 	reportOnly := flag.Bool("report-only", false, "write the duplicate report and exit without connecting to PostgreSQL")

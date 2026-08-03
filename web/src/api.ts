@@ -268,7 +268,12 @@ function joinApiPath(path: string): string {
  * retrying a financial request without the same idempotency key could create
  * a new operation instead of replaying the original intent.
  */
+import { clientLogger } from "./logger";
+
 async function request<T>(path: string, init: RequestInit = {}, config: RequestConfig = {}): Promise<T> {
+  const startedAt = performance.now();
+  const method = init.method ?? "GET";
+  const safePath = path.split("?", 1)[0];
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
 
@@ -281,16 +286,23 @@ async function request<T>(path: string, init: RequestInit = {}, config: RequestC
     body = JSON.stringify(config.body);
   }
 
-  const response = await fetch(joinApiPath(path), {
-    ...init,
-    body,
-    headers,
-    cache: "no-store",
-    referrerPolicy: "no-referrer",
-    signal: config.signal,
-  });
+  let response: Response;
+  try {
+    response = await fetch(joinApiPath(path), {
+      ...init,
+      body,
+      headers,
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      signal: config.signal,
+    });
+  } catch (error) {
+    clientLogger.error("api request failed", { method, path: safePath, duration_ms: Math.round(performance.now() - startedAt), error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
 
   if (response.ok) {
+    if (method !== "GET") clientLogger.info("api request completed", { method, path: safePath, status: response.status, duration_ms: Math.round(performance.now() - startedAt) });
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
@@ -309,6 +321,7 @@ async function request<T>(path: string, init: RequestInit = {}, config: RequestC
         code: "http_error",
       };
 
+  clientLogger.warn("api response error", { method, path: safePath, status: response.status, code: errorResponse.code, request_id: errorResponse.request_id, duration_ms: Math.round(performance.now() - startedAt) });
   throw new ApiError(response.status, errorResponse);
 }
 
@@ -409,7 +422,7 @@ export class ApiClient {
 
   createAccount(
     input: CreateAccountRequest = {},
-    options: AuthenticatedRequestOptions,
+    options: IdempotentRequestOptions,
   ): Promise<Account> {
     return request<Account>("/v1/accounts", { method: "POST" }, { ...options, body: input });
   }

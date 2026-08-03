@@ -88,6 +88,10 @@ type Service struct {
 // provider or an operator-authorized workflow.
 type Config struct {
 	AllowDemoDeposits bool
+	// AllowMissingAccountRecreation is a local recovery escape hatch. In a
+	// non-development environment, an active account missing from TigerBeetle
+	// must stop startup instead of being recreated with a zero balance.
+	AllowMissingAccountRecreation bool
 }
 
 // NewService creates a ledger service for the supported USD account model.

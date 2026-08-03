@@ -48,7 +48,8 @@ services:
       TIGERBEETLE_ADDRESS: ${TIGERBEETLE_ADDRESS:-tigerbeetle:3000}
       # Local manual testing only. Production must set this to false and use
       # a trusted funding workflow instead of the demo clearing account.
-      LEDGER_ALLOW_DEMO_DEPOSITS: ${LEDGER_ALLOW_DEMO_DEPOSITS:-true}
+      LEDGER_ALLOW_DEMO_DEPOSITS: ${LEDGER_ALLOW_DEMO_DEPOSITS:-false}
+      LEDGER_ALLOW_MISSING_ACCOUNT_RECREATION: ${LEDGER_ALLOW_MISSING_ACCOUNT_RECREATION:-false}
       AUTH_ACCESS_TTL: ${AUTH_ACCESS_TTL:-15m}
       AUTH_REFRESH_TTL: ${AUTH_REFRESH_TTL:-168h}
       API_RATE_LIMIT_PER_MINUTE: ${API_RATE_LIMIT_PER_MINUTE:-120}

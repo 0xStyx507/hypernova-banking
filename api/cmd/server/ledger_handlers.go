@@ -137,7 +137,12 @@ func (h ledgerHandler) createAccount(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(request.Currency) == "" {
 		request.Currency = "USD"
 	}
-	view, err := h.service.CreateAccount(r.Context(), authenticatedUser(r), request.Currency)
+	key := idempotencyKey(r)
+	if key == "" {
+		writeErrorCode(w, http.StatusBadRequest, "missing_idempotency_key", "Idempotency-Key is required")
+		return
+	}
+	view, err := h.service.CreateAccountIdempotent(r.Context(), authenticatedUser(r), request.Currency, key)
 	if err != nil {
 		writeLedgerError(w, err)
 		return

@@ -44,7 +44,7 @@ export interface AssistantReply {
 
 export interface DashboardData {
   themeMode: ThemeMode;
-  onThemeModeChange: (mode: ThemeMode) => void;
+  onThemeModeChange: (mode: "system" | "light" | "dark") => void;
   accounts: Account[];
   accountBalances: Record<string, Balance>;
   activeAccount?: Account;

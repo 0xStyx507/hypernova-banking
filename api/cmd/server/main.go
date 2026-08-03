@@ -25,6 +25,7 @@ import (
 // HTTP routing, probes and environment parsing live in dedicated adapters.
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
 	if isHealthcheckCommand(os.Args) {
 		if err := runHealthcheck(); err != nil {
 			logger.Error("healthcheck failed", "error", err)
@@ -75,8 +76,14 @@ func main() {
 		logger.Error("unsafe demo deposits are not allowed outside development", "app_env", appEnv)
 		os.Exit(1)
 	}
+	allowMissingAccountRecreation := boolFromEnv("LEDGER_ALLOW_MISSING_ACCOUNT_RECREATION", false)
+	if appEnv != "development" && allowMissingAccountRecreation {
+		logger.Error("missing ledger account recreation is not allowed outside development", "app_env", appEnv)
+		os.Exit(1)
+	}
 	ledgerService := ledger.NewService(persistence, ledgerClient, ledger.Config{
-		AllowDemoDeposits: allowDemoDeposits,
+		AllowDemoDeposits:               allowDemoDeposits,
+		AllowMissingAccountRecreation: allowMissingAccountRecreation,
 	})
 	if err := ledgerService.EnsureSystemAccount(startupCtx); err != nil {
 		logger.Error("ledger system account initialization failed", "error", err)
@@ -86,6 +93,12 @@ func main() {
 		logger.Error("ledger account reconciliation failed", "error", err)
 		os.Exit(1)
 	}
+	operationReport, err := ledgerService.ReconcilePendingOperations(startupCtx)
+	if err != nil {
+		logger.Error("ledger operation reconciliation failed", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("ledger operations reconciled", "stale_marked", operationReport.StaleMarked, "completed", operationReport.Completed, "failed", operationReport.Failed, "still_unknown", operationReport.StillUnknown)
 
 	configuredMFAKey := strings.TrimSpace(os.Getenv("MFA_ENCRYPTION_KEY"))
 	if appEnv != "development" && configuredMFAKey == "" {

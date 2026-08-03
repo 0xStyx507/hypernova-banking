@@ -25,10 +25,10 @@
 ## Contratos
 
 El contrato machine-readable de esta superficie está en
-[`docs/openapi.yaml`](openapi.yaml).
+[`openapi.yaml`](../openapi.yaml).
 
 `POST /api/v1/auth/register` recibe `email`, `password` y `full_name`. Además
-de la identidad, provisiona la cuenta HNL de checking inicial.
+de la identidad, provisiona la cuenta USD de checking inicial.
 
 `POST /api/v1/auth/login` recibe `email` y `password` y devuelve el usuario,
 `access_token`, `refresh_token` y sus expiraciones.
@@ -66,5 +66,5 @@ slice para no convertir un email en una prueba suficiente de control de cuenta.
 
 Las migraciones se aplican al arrancar la API y se registran en
 `schema_migrations`. El comando `scripts/seed-users.ps1` carga únicamente la
-colección `users` de `datos-prueba-HNL.json`; las cuentas y transacciones
+colección `users` de `datos-prueba-USD.json`; las cuentas y transacciones
 financieras se gestionan mediante TigerBeetle.

@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -54,7 +55,7 @@ func (s *Service) ReconcileActiveAccounts(ctx context.Context) error {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id::text, tigerbeetle_account_id, status
 		FROM ledger_accounts
-		WHERE status IN ('active', 'provisioning')
+		WHERE status IN ('active', 'provisioning', 'closing')
 		ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -75,12 +76,18 @@ func (s *Service) ReconcileActiveAccounts(ctx context.Context) error {
 			return fmt.Errorf("lookup ledger identity: %w", err)
 		}
 		if len(found) > 0 {
-			if status == "provisioning" {
-				if _, err := s.pool.Exec(ctx, `UPDATE ledger_accounts SET status = 'active', updated_at = NOW() WHERE id = $1 AND status = 'provisioning'`, publicID); err != nil {
+			if status == "provisioning" || status == "closing" {
+				// A process can stop after entering provisioning/closing. A
+				// TigerBeetle account that still exists is safe to expose again;
+				// an interrupted close is retried explicitly by the operator.
+				if _, err := s.pool.Exec(ctx, `UPDATE ledger_accounts SET status = 'active', updated_at = NOW() WHERE id = $1 AND status IN ('provisioning', 'closing')`, publicID); err != nil {
 					return fmt.Errorf("activate recovered ledger account: %w", err)
 				}
 			}
 			continue
+		}
+		if status == "active" && !s.config.AllowMissingAccountRecreation {
+			return fmt.Errorf("active ledger account %s is missing from TigerBeetle; manual recovery is required", publicID)
 		}
 		results, err := s.client.CreateAccounts([]tigerbeetle.Account{{
 			ID:     accountID,
@@ -121,6 +128,21 @@ type AccountView struct {
 
 // CreateAccount provisions one user-owned checking account.
 func (s *Service) CreateAccount(ctx context.Context, userID uuid.UUID, currency string, metadata ...RequestMetadata) (AccountView, error) {
+	return s.createAccount(ctx, userID, currency, "", metadata...)
+}
+
+// CreateAccountIdempotent reserves a user-owned account under a caller key.
+// Replaying the same key returns the original account, including after an
+// uncertain response or an interrupted TigerBeetle provisioning call.
+func (s *Service) CreateAccountIdempotent(ctx context.Context, userID uuid.UUID, currency, key string, metadata ...RequestMetadata) (AccountView, error) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(key) > 128 {
+		return AccountView{}, ErrInvalidInput
+	}
+	return s.createAccount(ctx, userID, currency, key, metadata...)
+}
+
+func (s *Service) createAccount(ctx context.Context, userID uuid.UUID, currency, key string, metadata ...RequestMetadata) (AccountView, error) {
 	if s == nil || s.pool == nil || userID == uuid.Nil {
 		return AccountView{}, ErrInvalidInput
 	}
@@ -132,11 +154,31 @@ func (s *Service) CreateAccount(ctx context.Context, userID uuid.UUID, currency 
 	reservedTigerID := uuidToTigerID(accountID).String()
 	var view AccountView
 	var persistedTigerID string
-	err = s.pool.QueryRow(ctx, `
-		INSERT INTO ledger_accounts (id, user_id, tigerbeetle_account_id, account_type, currency)
-		VALUES ($1, $2, $3, 'checking', $4)
-		RETURNING id, COALESCE(display_name, ''), tigerbeetle_account_id, account_type, currency, status, created_at
-	`, accountID, userID, reservedTigerID, currency).Scan(&view.ID, &view.DisplayName, &persistedTigerID, &view.Type, &view.Currency, &view.Status, &view.CreatedAt)
+	requestHash := hashAccountCreation(currency)
+	var storedHash []byte
+	if key == "" {
+		err = s.pool.QueryRow(ctx, `
+			INSERT INTO ledger_accounts (id, user_id, tigerbeetle_account_id, account_type, currency)
+			VALUES ($1, $2, $3, 'checking', $4)
+			RETURNING id, COALESCE(display_name, ''), tigerbeetle_account_id, account_type, currency, status, created_at
+		`, accountID, userID, reservedTigerID, currency).Scan(&view.ID, &view.DisplayName, &persistedTigerID, &view.Type, &view.Currency, &view.Status, &view.CreatedAt)
+	} else {
+		err = s.pool.QueryRow(ctx, `
+			INSERT INTO ledger_accounts (id, user_id, tigerbeetle_account_id, account_type, currency, creation_idempotency_key, creation_request_hash)
+			VALUES ($1, $2, $3, 'checking', $4, $5, $6)
+			ON CONFLICT DO NOTHING
+			RETURNING id, COALESCE(display_name, ''), tigerbeetle_account_id, account_type, currency, status, created_at, creation_request_hash
+		`, accountID, userID, reservedTigerID, currency, key, requestHash).Scan(&view.ID, &view.DisplayName, &persistedTigerID, &view.Type, &view.Currency, &view.Status, &view.CreatedAt, &storedHash)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = s.pool.QueryRow(ctx, `
+				SELECT id, COALESCE(display_name, ''), tigerbeetle_account_id, account_type, currency, status, created_at, creation_request_hash
+				FROM ledger_accounts WHERE user_id = $1 AND creation_idempotency_key = $2
+			`, userID, key).Scan(&view.ID, &view.DisplayName, &persistedTigerID, &view.Type, &view.Currency, &view.Status, &view.CreatedAt, &storedHash)
+		}
+		if err == nil && !bytes.Equal(storedHash, requestHash) {
+			return AccountView{}, ErrIdempotencyConflict
+		}
+	}
 	if err != nil {
 		return AccountView{}, fmt.Errorf("reserve ledger account: %w", err)
 	}
@@ -207,6 +249,22 @@ func (s *Service) ListAccounts(ctx context.Context, userID uuid.UUID) ([]Account
 // EnsureInitialAccount repairs a partially completed registration without
 // creating duplicates when an active account already exists.
 func (s *Service) EnsureInitialAccount(ctx context.Context, userID uuid.UUID, metadata ...RequestMetadata) (AccountView, error) {
+	if s == nil || s.pool == nil || userID == uuid.Nil {
+		return AccountView{}, ErrInvalidInput
+	}
+	// Registration/login recovery can be reached concurrently by several
+	// clients. A database advisory lock makes the check-and-provision sequence
+	// atomic across API instances without holding a PostgreSQL transaction open
+	// while TigerBeetle is called.
+	lockConn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return AccountView{}, fmt.Errorf("acquire initial account lock: %w", err)
+	}
+	defer lockConn.Release()
+	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1::text, 0))`, userID.String()); err != nil {
+		return AccountView{}, fmt.Errorf("lock initial account owner: %w", err)
+	}
+	defer func() { _, _ = lockConn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`, userID.String()) }()
 	accounts, err := s.ListAccounts(ctx, userID)
 	if err != nil {
 		return AccountView{}, err
@@ -228,37 +286,92 @@ func (s *Service) CloseAccount(ctx context.Context, userID uuid.UUID, publicID s
 	if err != nil {
 		return err
 	}
+	// Move to a transient state before reading TigerBeetle. New operations only
+	// accept active accounts, so this prevents a close request from racing with
+	// a later validation. Existing reserved operations are checked below before
+	// the final transition to closed.
+	accountID, err := uuid.Parse(account.publicID)
+	if err != nil {
+		return ErrInvalidInput
+	}
+	lockConn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire account closure lock: %w", err)
+	}
+	defer lockConn.Release()
+	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended($1::text, 0))`, account.tigerID); err != nil {
+		return fmt.Errorf("lock account closure: %w", err)
+	}
+	defer func() { _, _ = lockConn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`, account.tigerID) }()
+	if tag, err := s.pool.Exec(ctx, `UPDATE ledger_accounts SET status = 'closing', updated_at = NOW() WHERE id = $1 AND user_id = $2 AND status = 'active'`, accountID, userID); err != nil {
+		return fmt.Errorf("begin ledger account closure: %w", err)
+	} else if tag.RowsAffected() != 1 {
+		return ErrNotFound
+	}
+	restoreActive := func() {
+		_, _ = s.pool.Exec(context.Background(), `UPDATE ledger_accounts SET status = 'active', updated_at = NOW() WHERE id = $1 AND user_id = $2 AND status = 'closing'`, accountID, userID)
+	}
 	tbID, err := tigerbeetle.HexStringToUint128(account.tigerID)
 	if err != nil {
+		restoreActive()
 		return ErrLedgerRejected
 	}
 	accounts, err := s.client.LookupAccounts([]tigerbeetle.Uint128{tbID})
 	if err != nil {
+		restoreActive()
 		return fmt.Errorf("lookup account before close: %w", err)
 	}
 	if len(accounts) != 1 || accounts[0].ID != tbID {
+		restoreActive()
 		return ErrNotFound
 	}
 	ledgerAccount := accounts[0]
 	balance := new(big.Int).Sub(ledgerAccount.CreditsPosted.BigInt(), ledgerAccount.DebitsPosted.BigInt())
 	if balance.Sign() != 0 || ledgerAccount.CreditsPending.BigInt().Sign() != 0 || ledgerAccount.DebitsPending.BigInt().Sign() != 0 {
+		restoreActive()
 		return ErrAccountNotEmpty
 	}
-	accountID, err := uuid.Parse(account.publicID)
-	if err != nil {
-		return ErrInvalidInput
+	var operationInFlight bool
+	if err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM ledger_operations
+			WHERE (debit_account_id = $1 OR credit_account_id = $1)
+			  AND status IN ('processing', 'unknown')
+		)
+	`, account.tigerID).Scan(&operationInFlight); err != nil {
+		restoreActive()
+		return fmt.Errorf("check account operations before close: %w", err)
 	}
-	if tag, err := s.pool.Exec(ctx, `UPDATE ledger_accounts SET status = 'closed', updated_at = NOW() WHERE id = $1 AND user_id = $2 AND status = 'active'`, accountID, userID); err != nil {
+	if operationInFlight {
+		restoreActive()
+		return ErrConflict
+	}
+	transaction, err := s.pool.Begin(ctx)
+	if err != nil {
+		restoreActive()
+		return fmt.Errorf("begin complete account closure: %w", err)
+	}
+	defer transaction.Rollback(ctx)
+	if tag, err := transaction.Exec(ctx, `UPDATE ledger_accounts SET status = 'closed', updated_at = NOW() WHERE id = $1 AND user_id = $2 AND status = 'closing'`, accountID, userID); err != nil {
+		_ = transaction.Rollback(ctx)
+		restoreActive()
 		return fmt.Errorf("close ledger account: %w", err)
 	} else if tag.RowsAffected() != 1 {
+		_ = transaction.Rollback(ctx)
+		restoreActive()
 		return ErrNotFound
 	}
 	requestMetadata := RequestMetadata{}
 	if len(metadata) > 0 {
 		requestMetadata = metadata[0]
 	}
-	if err := audit.Record(ctx, s.pool, &userID, "account_closed", map[string]any{"account_id": publicID}, requestMetadata.IPAddress, requestMetadata.UserAgent); err != nil {
+	if err := audit.Record(ctx, transaction, &userID, "account_closed", map[string]any{"account_id": publicID}, requestMetadata.IPAddress, requestMetadata.UserAgent); err != nil {
+		_ = transaction.Rollback(ctx)
+		restoreActive()
 		return fmt.Errorf("audit account closure: %w", err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit account closure: %w", err)
 	}
 	return nil
 }

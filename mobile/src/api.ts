@@ -35,6 +35,7 @@ export class MobileApiError extends Error {
 }
 
 import Constants from "expo-constants";
+import { clientLogger } from "./logger";
 
 /**
  * Resolves the API host for both a simulator and a physical device.
@@ -56,17 +57,27 @@ function resolveBaseUrl(): string {
 const baseUrl = resolveBaseUrl();
 
 async function request<T>(path: string, init: RequestInit = {}, accessToken?: string, idempotencyKey?: string, signal?: AbortSignal): Promise<T> {
+  const startedAt = Date.now();
+  const method = init.method ?? "GET";
+  const safePath = path.split("?", 1)[0];
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (init.body) headers.set("Content-Type", "application/json");
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
   if (idempotencyKey) headers.set("Idempotency-Key", idempotencyKey);
-  const response = await fetch(`${baseUrl}/${path.replace(/^\//, "")}`, { ...init, headers, cache: "no-store", signal });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}/${path.replace(/^\//, "")}`, { ...init, headers, cache: "no-store", signal });
+  } catch (error) {
+    clientLogger.error("api request failed", { method, path: safePath, duration_ms: Date.now() - startedAt, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
   // DELETE endpoints may intentionally return 204 without a response body.
   // Do not attempt to parse JSON in that case; callers still receive a
   // successful typed result and the shared contract remains consistent with
   // the web client.
   if (response.ok) {
+    if (method !== "GET") clientLogger.info("api request completed", { method, path: safePath, status: response.status, duration_ms: Date.now() - startedAt });
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }
@@ -75,6 +86,7 @@ async function request<T>(path: string, init: RequestInit = {}, accessToken?: st
     const candidate = (await response.json()) as Partial<ApiErrorBody>;
     if (typeof candidate.error === "string" && typeof candidate.code === "string") payload = candidate as ApiErrorBody;
   } catch { /* Keep a generic public error when the server has no JSON body. */ }
+  clientLogger.warn("api response error", { method, path: safePath, status: response.status, code: payload.code, duration_ms: Date.now() - startedAt });
   throw new MobileApiError(response.status, payload);
 }
 
@@ -91,7 +103,7 @@ export const mobileApi = {
   verifyMFA(code: string, accessToken: string) { return request<MFAStatus>("/v1/auth/mfa/verify", { method: "POST", body: JSON.stringify({ code }) }, accessToken); },
   accounts(accessToken: string) { return request<{ items: Account[] }>("/v1/accounts", {}, accessToken); },
   account(accountId: string, accessToken: string) { return request<Account>(`/v1/accounts/${encodeURIComponent(accountId)}`, {}, accessToken); },
-  createAccount(accessToken: string) { return request<Account>("/v1/accounts", { method: "POST", body: JSON.stringify({ currency: "USD" }) }, accessToken); },
+  createAccount(accessToken: string, key: string) { return request<Account>("/v1/accounts", { method: "POST", body: JSON.stringify({ currency: "USD" }) }, accessToken, key); },
   renameAccount(accountId: string, displayName: string, accessToken: string) { return request<Account>(`/v1/accounts/${encodeURIComponent(accountId)}`, { method: "PATCH", body: JSON.stringify({ display_name: displayName }) }, accessToken); },
   closeAccount(accountId: string, accessToken: string) { return request<void>(`/v1/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }, accessToken); },
   balance(accountId: string, accessToken: string) { return request<Balance>(`/v1/accounts/${accountId}/balance`, {}, accessToken); },

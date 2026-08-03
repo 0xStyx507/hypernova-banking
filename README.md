@@ -10,8 +10,10 @@ TigerBeetle.
 
 La fuente de verdad financiera será TigerBeetle. PostgreSQL se reservará para identidad, sesiones, auditoría, metadatos y acciones preparadas de MCP.
 
-El registro provisiona una cuenta HNL de checking. Los depósitos son una
+El registro provisiona una cuenta USD de checking. Los depósitos son una
 capacidad de demostración local controlada por `LEDGER_ALLOW_DEMO_DEPOSITS`;
+la opción está desactivada por defecto y debe habilitarse explícitamente solo
+para una demo local;
 una integración real debe reemplazarla por un flujo autorizado de fondeo.
 
 Los datos de prueba y artefactos de evaluación se mantienen fuera del control
@@ -65,7 +67,7 @@ local de reconciliación sin conectarse a PostgreSQL:
 ```powershell
 New-Item -ItemType Directory -Force data | Out-Null
 Push-Location api
-go run ./cmd/seed -file ..\datos-prueba-HNL.json -duplicates-report ..\data\duplicate-email-report.json -report-only
+go run ./cmd/seed -file ..\datos-prueba-USD.json -duplicates-report ..\data\duplicate-email-report.json -report-only
 Pop-Location
 ```
 
@@ -130,18 +132,20 @@ Endpoints financieros:
 
 Las mutaciones financieras requieren `Authorization: Bearer <access_token>` e
 `Idempotency-Key`. Los importes se envían como cadenas de unidades menores;
-actualmente solo se admite HNL.
+actualmente solo se admite USD.
 
 La superficie autenticada de MCP expone herramientas de lectura y acciones
 financieras con el flujo `prepare → confirm` o `cancel`. Preparar no modifica
-el ledger; confirmar exige el cuerpo exacto `{ "confirmation": "CONFIRM" }` y
+el ledger; confirmar exige el cuerpo exacto `{ "pin": "1234" }` y
 usa el ID preparado como clave idempotente.
 
 El chat autenticado (`POST /api/v1/chat/messages`) usa un proveedor local
 determinista y un cliente MCP HTTP. Puede consultar saldo mediante herramientas
 de solo lectura; nunca ejecuta una mutación directamente desde el mensaje.
 
-El contrato OpenAPI se encuentra en [`docs/openapi.yaml`](docs/openapi.yaml).
+El contrato OpenAPI se encuentra en [`openapi.yaml`](openapi.yaml).
+
+Las respuestas incluyen `X-Request-ID` para correlacionar incidentes y soporte. El cliente puede enviar un UUID propio; si no lo hace, la API genera uno.
 
 El API aplica un límite local configurable con `API_RATE_LIMIT_PER_MINUTE` y
 la web permite descargar el historial reciente en CSV.

@@ -116,14 +116,17 @@ func (s *Service) OAuthExchange(ctx context.Context, provider OAuthProvider, cod
 	var expiresAt time.Time
 	var mfaEnabled bool
 	var encryptedMFASecret []byte
+	var mfaFailedAttempts int
+	var mfaLockedUntil *time.Time
 	err = tx.QueryRow(ctx, `
 		SELECT e.expires_at, u.id, u.email, u.full_name,
-		       u.created_at, u.mfa_enabled, u.mfa_secret_encrypted
+		       u.created_at, u.mfa_enabled, u.mfa_secret_encrypted,
+		       u.mfa_failed_attempts, u.mfa_locked_until
 		FROM oauth_exchange_codes e
 		JOIN users u ON u.id = e.user_id AND u.active
 		WHERE e.provider = $1 AND e.code_hash = $2
 		FOR UPDATE OF e, u
-	`, provider, tokenHash(code)).Scan(&expiresAt, &user.ID, &user.Email, &user.FullName, &user.CreatedAt, &mfaEnabled, &encryptedMFASecret)
+	`, provider, tokenHash(code)).Scan(&expiresAt, &user.ID, &user.Email, &user.FullName, &user.CreatedAt, &mfaEnabled, &encryptedMFASecret, &mfaFailedAttempts, &mfaLockedUntil)
 	if err != nil {
 		return Tokens{}, ErrOAuthExchangeInvalid
 	}
@@ -133,6 +136,10 @@ func (s *Service) OAuthExchange(ctx context.Context, provider OAuthProvider, cod
 		return Tokens{}, ErrOAuthExchangeInvalid
 	}
 	if mfaEnabled {
+		now := time.Now().UTC()
+		if mfaLockedUntil != nil && now.Before(*mfaLockedUntil) {
+			return Tokens{}, ErrMFALocked
+		}
 		if strings.TrimSpace(mfaCode) == "" {
 			_ = audit.Record(ctx, tx, &user.ID, "oauth_mfa_required", nil, metadata.IPAddress, metadata.UserAgent)
 			_ = tx.Commit(ctx)
@@ -140,9 +147,30 @@ func (s *Service) OAuthExchange(ctx context.Context, provider OAuthProvider, cod
 		}
 		secret, decryptErr := decryptMFASecret(s.mfaKey, encryptedMFASecret)
 		if decryptErr != nil || !VerifyTOTP(secret, mfaCode, time.Now().UTC()) {
+			mfaFailedAttempts++
+			var nextLockedUntil *time.Time
+			if mfaFailedAttempts >= 5 {
+				lockUntil := now.Add(15 * time.Minute)
+				nextLockedUntil = &lockUntil
+			}
+			if _, updateErr := tx.Exec(ctx, `
+				UPDATE users SET mfa_failed_attempts = $1, mfa_locked_until = $2, updated_at = NOW()
+				WHERE id = $3
+			`, mfaFailedAttempts, nextLockedUntil, user.ID); updateErr != nil {
+				return Tokens{}, fmt.Errorf("record oauth MFA failure: %w", updateErr)
+			}
 			_ = audit.Record(ctx, tx, &user.ID, "oauth_mfa_failure", nil, metadata.IPAddress, metadata.UserAgent)
 			_ = tx.Commit(ctx)
+			if nextLockedUntil != nil {
+				return Tokens{}, ErrMFALocked
+			}
 			return Tokens{}, ErrInvalidMFACode
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE users SET mfa_failed_attempts = 0, mfa_locked_until = NULL, updated_at = NOW()
+			WHERE id = $1
+		`, user.ID); err != nil {
+			return Tokens{}, fmt.Errorf("reset oauth MFA failures: %w", err)
 		}
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM oauth_exchange_codes WHERE provider = $1 AND code_hash = $2", provider, tokenHash(code)); err != nil {

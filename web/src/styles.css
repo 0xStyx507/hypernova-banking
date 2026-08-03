@@ -8,6 +8,15 @@
   --hypernova-purple: #5b20a3;
   --hypernova-ink: #24315e;
   --hypernova-background: #f7f9fb;
+  --hypernova-surface: #ffffff;
+  --hypernova-surface-muted: #f8fafc;
+  --hypernova-surface-subtle: #f3f7fa;
+  --hypernova-border: #e1e8ef;
+  --hypernova-border-strong: #cbd8e4;
+  --hypernova-text-muted: #526174;
+  --hypernova-text-subtle: #60758a;
+  --hypernova-input-background: #ffffff;
+  --hypernova-input-border: #d9e0e8;
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   color: var(--hypernova-ink);
   background: var(--hypernova-background);
@@ -20,6 +29,15 @@ html[data-theme="dark"] {
   --hypernova-background: #0d1726;
   --hypernova-blue: #5ba3d6;
   --hypernova-teal: #35d2c5;
+  --hypernova-surface: #142235;
+  --hypernova-surface-muted: #182a40;
+  --hypernova-surface-subtle: #1d3047;
+  --hypernova-border: #344b65;
+  --hypernova-border-strong: #40566f;
+  --hypernova-text-muted: #bfd0e2;
+  --hypernova-text-subtle: #a9bbcf;
+  --hypernova-input-background: #1a2b40;
+  --hypernova-input-border: #40566f;
   color-scheme: dark;
 }
 
@@ -44,7 +62,7 @@ input,
 select {
   border: 1px solid var(--hypernova-input-border, #d9e0e8);
   border-radius: 0.9rem;
-  background: #fff;
+  background: var(--hypernova-input-background);
   color: var(--hypernova-ink);
   font: inherit;
   outline: none;
@@ -2576,6 +2594,59 @@ html[data-theme="dark"] .profile-form input:disabled { color: #a9bbcf; }
   .settings-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* The application uses one supported appearance: light. */
+.theme-settings {
+  display: none !important;
+}
+
+/* Keep utility-heavy dashboard components on the same dark palette even when
+   a view still uses a light Tailwind utility class. */
+html[data-theme="dark"] .dashboard-page .text-slate-400,
+html[data-theme="dark"] .dashboard-page .text-slate-500,
+html[data-theme="dark"] .dashboard-page .field-help,
+html[data-theme="dark"] .dashboard-page .profile-help {
+  color: var(--hypernova-text-subtle) !important;
+}
+
+html[data-theme="dark"] .dashboard-page .text-slate-600,
+html[data-theme="dark"] .dashboard-page .text-slate-700 {
+  color: var(--hypernova-text-muted) !important;
+}
+
+html[data-theme="dark"] .dashboard-page .bg-slate-50,
+html[data-theme="dark"] .dashboard-page .bg-slate-100 {
+  background: var(--hypernova-surface-subtle) !important;
+}
+
+html[data-theme="dark"] .dashboard-page .border-slate-100,
+html[data-theme="dark"] .dashboard-page .border-slate-200,
+html[data-theme="dark"] .dashboard-page .border-slate-300 {
+  border-color: var(--hypernova-border) !important;
+}
+
+html[data-theme="dark"] .dashboard-page input,
+html[data-theme="dark"] .dashboard-page select,
+html[data-theme="dark"] .dashboard-page textarea {
+  background: var(--hypernova-input-background);
+  border-color: var(--hypernova-border-strong);
+  color: var(--hypernova-ink);
+}
+
+html[data-theme="dark"] .dashboard-page input::placeholder,
+html[data-theme="dark"] .dashboard-page textarea::placeholder {
+  color: var(--hypernova-text-subtle);
+}
+
+html[data-theme="dark"] .dashboard-page .surface,
+html[data-theme="dark"] .dashboard-page .bank-account-section,
+html[data-theme="dark"] .dashboard-page .history-filter-panel,
+html[data-theme="dark"] .dashboard-page .history-results,
+html[data-theme="dark"] .dashboard-page .mcp-chat-panel {
+  background: var(--hypernova-surface);
+  border-color: var(--hypernova-border);
+  color: var(--hypernova-ink);
 }
 
 /* Keep the banking layout aligned with the Hyper Bank identity. */

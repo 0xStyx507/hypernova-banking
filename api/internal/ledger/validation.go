@@ -51,6 +51,11 @@ func hashRequestWithScope(operationType string, debit, credit tigerbeetle.Uint12
 	return hash[:]
 }
 
+func hashAccountCreation(currency string) []byte {
+	hash := sha256.Sum256([]byte("account|" + currency))
+	return hash[:]
+}
+
 func uint128String(value tigerbeetle.Uint128) string {
 	parsed := value.BigInt()
 	return parsed.String()

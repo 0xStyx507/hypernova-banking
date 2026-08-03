@@ -62,6 +62,9 @@ func (h authHandler) login(w http.ResponseWriter, r *http.Request) {
 			writeErrorCode(w, http.StatusUnauthorized, "mfa_required", "multi-factor authentication code required")
 		case errors.Is(err, auth.ErrInvalidMFACode):
 			writeErrorCode(w, http.StatusUnauthorized, "mfa_invalid_code", "invalid multi-factor authentication code")
+		case errors.Is(err, auth.ErrMFALocked):
+			w.Header().Set("Retry-After", "900")
+			writeErrorCode(w, http.StatusTooManyRequests, "mfa_locked", "multi-factor authentication is temporarily locked")
 		case errors.Is(err, auth.ErrMFAUnavailable):
 			writeErrorCode(w, http.StatusServiceUnavailable, "mfa_unavailable", "multi-factor authentication is unavailable")
 		default:

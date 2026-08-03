@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"time"
 
@@ -43,6 +44,29 @@ func (s *Service) startOperation(ctx context.Context, userID uuid.UUID, key stri
 		return operationRecord{}, false, fmt.Errorf("begin operation: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	accountLocks := []string{debitID, creditID}
+	sort.Strings(accountLocks)
+	for _, accountID := range accountLocks {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, accountID); err != nil {
+			return operationRecord{}, false, fmt.Errorf("lock ledger account: %w", err)
+		}
+	}
+	// The account records were read before this transaction began. Re-check
+	// their status after acquiring the same advisory locks used by closure so a
+	// stale active read cannot create a new operation on a closed account.
+	systemID := systemAccountID(s.currency).String()
+	for _, accountID := range accountLocks {
+		if accountID == systemID {
+			continue
+		}
+		var active bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM ledger_accounts WHERE tigerbeetle_account_id = $1 AND status = 'active')`, accountID).Scan(&active); err != nil {
+			return operationRecord{}, false, fmt.Errorf("revalidate ledger account: %w", err)
+		}
+		if !active {
+			return operationRecord{}, false, ErrNotFound
+		}
+	}
 	operationID := uuid.New()
 	transferID := tigerbeetle.ID().String()
 	insertTag, err := tx.Exec(ctx, `

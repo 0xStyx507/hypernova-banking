@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )`
 
+const migrationLockKey int64 = 0x48595045524e4f56
+
 // Open creates a bounded PostgreSQL connection pool. The caller owns the pool
 // and must call Close when the process is shutting down.
 func Open(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
@@ -60,7 +62,17 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	if pool == nil {
 		return fmt.Errorf("database pool is required")
 	}
-	if _, err := pool.Exec(ctx, migrationTable); err != nil {
+	lockConn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration lock connection: %w", err)
+	}
+	defer lockConn.Release()
+	if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockKey); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() { _, _ = lockConn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", migrationLockKey) }()
+
+	if _, err := lockConn.Exec(ctx, migrationTable); err != nil {
 		return fmt.Errorf("create migration table: %w", err)
 	}
 
@@ -77,7 +89,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 
 		var applied bool
-		if err := pool.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)", version).Scan(&applied); err != nil {
+		if err := lockConn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)", version).Scan(&applied); err != nil {
 			return fmt.Errorf("check migration %s: %w", file, err)
 		}
 		if applied {
@@ -88,7 +100,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", file, err)
 		}
-		tx, err := pool.Begin(ctx)
+		tx, err := lockConn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin migration %s: %w", file, err)
 		}

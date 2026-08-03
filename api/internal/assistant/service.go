@@ -225,12 +225,20 @@ func (s *Service) Chat(ctx context.Context, accessToken, message, selectedAccoun
 	if response.FinancialAction != nil {
 		actionRequest := *response.FinancialAction
 		if actionRequest.ActionType == "deposit" || actionRequest.ActionType == "withdrawal" {
+			// Use the account selected in the UI when the assistant omitted it.
+			// Otherwise a simple "deposit 10" gets stuck asking for an account.
+			if actionRequest.AccountID == "" {
+				actionRequest.AccountID = accountID
+			}
 			if actionRequest.AccountID == "" {
 				return s.pendingConversation(ctx, accessToken, ConversationState{ActionType: actionRequest.ActionType, Amount: actionRequest.Amount, TransferType: actionRequest.TransferType}, result)
 			}
 		}
 		if actionRequest.ActionType == "transfer" && actionRequest.SourceAccountID == "" {
-			return s.pendingConversation(ctx, accessToken, ConversationState{ActionType: "transfer", Amount: actionRequest.Amount, DestinationAccount: actionRequest.DestinationAccount, TransferType: actionRequest.TransferType}, result)
+			actionRequest.SourceAccountID = accountID
+			if actionRequest.SourceAccountID == "" {
+				return s.pendingConversation(ctx, accessToken, ConversationState{ActionType: "transfer", Amount: actionRequest.Amount, DestinationAccount: actionRequest.DestinationAccount, TransferType: actionRequest.TransferType}, result)
+			}
 		}
 		if actionRequest.ActionType == "transfer" && actionRequest.DestinationAccount == "" {
 			result.Message = "Indica la cuenta destino para preparar la transferencia."

@@ -107,6 +107,12 @@ func (s *Service) Prepare(ctx context.Context, userID uuid.UUID, request ActionR
 		return Action{}, fmt.Errorf("begin prepared action: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	// Serialize preparation per user. The pending-action limit is a domain
+	// invariant, so counting rows without a transaction-scoped lock would let
+	// two concurrent requests both observe zero pending actions.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))`, userID.String()); err != nil {
+		return Action{}, fmt.Errorf("lock prepared action owner: %w", err)
+	}
 	var pending int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM mcp_prepared_actions WHERE user_id = $1 AND status IN ('ready', 'confirming') AND expires_at > NOW()`, userID).Scan(&pending); err != nil {
 		return Action{}, fmt.Errorf("count pending actions: %w", err)
@@ -311,9 +317,11 @@ func (s *Service) Confirm(ctx context.Context, userID uuid.UUID, action Action, 
 	return action, nil
 }
 
-// Cancel invalidates a ready action, or a stale confirming action left by an
-// interrupted request. A fresh confirming action remains protected briefly so
-// an in-flight ledger operation cannot be cancelled concurrently.
+// Cancel invalidates only a ready action. A confirming action may represent an
+// in-flight or uncertain TigerBeetle operation, so cancelling it based on a
+// wall-clock lease could make the public approval state disagree with money
+// that was actually moved. Claim can safely retry an old confirming action
+// because the action ID is also the ledger idempotency key.
 func (s *Service) Cancel(ctx context.Context, userID uuid.UUID, publicID string, metadata ledger.RequestMetadata) (Action, error) {
 	action, err := s.Load(ctx, userID, publicID)
 	if err != nil {
@@ -330,7 +338,7 @@ func (s *Service) Cancel(ctx context.Context, userID uuid.UUID, publicID string,
 		return Action{}, fmt.Errorf("begin cancelled action: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	commandTag, err := tx.Exec(ctx, `UPDATE mcp_prepared_actions SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW() WHERE id = $1 AND user_id = $2 AND (status = 'ready' OR (status = 'confirming' AND updated_at < NOW() - INTERVAL '30 seconds'))`, uuid.MustParse(action.ID), userID)
+	commandTag, err := tx.Exec(ctx, `UPDATE mcp_prepared_actions SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW() WHERE id = $1 AND user_id = $2 AND status = 'ready'`, uuid.MustParse(action.ID), userID)
 	if err != nil {
 		return Action{}, fmt.Errorf("cancel prepared action: %w", err)
 	}

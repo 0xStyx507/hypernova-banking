@@ -152,6 +152,9 @@ func writeOAuthError(w http.ResponseWriter, err error) {
 		writeErrorCode(w, http.StatusUnauthorized, "mfa_required", "multi-factor authentication code required")
 	case errors.Is(err, auth.ErrInvalidMFACode):
 		writeErrorCode(w, http.StatusUnauthorized, "mfa_invalid_code", "invalid multi-factor authentication code")
+	case errors.Is(err, auth.ErrMFALocked):
+		w.Header().Set("Retry-After", "900")
+		writeErrorCode(w, http.StatusTooManyRequests, "mfa_locked", "multi-factor authentication is temporarily locked")
 	default:
 		writeErrorCode(w, http.StatusInternalServerError, "oauth_error", "OAuth authentication failed")
 	}

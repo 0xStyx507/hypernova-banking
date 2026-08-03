@@ -2,8 +2,6 @@ import { Account, Balance, History, MCPAction, OperationMode, User } from "../..
 import { DashboardSection } from "../../types";
 
 export interface MobileDashboardProps {
-  themeMode: "system" | "light" | "dark";
-  onThemeModeChange: (mode: "system" | "light" | "dark") => void;
   user: User;
   accessToken: string;
   accounts: Account[];

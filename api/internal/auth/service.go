@@ -334,13 +334,30 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, metadata Req
 
 	var sessionID, userID uuid.UUID
 	var refreshExpiresAt time.Time
+	refreshHash := tokenHash(refreshToken)
 	err = tx.QueryRow(ctx, `
 		SELECT id, user_id, refresh_expires_at
 		FROM sessions
 		WHERE refresh_token_hash = $1 AND revoked_at IS NULL
 		FOR UPDATE
-	`, tokenHash(refreshToken)).Scan(&sessionID, &userID, &refreshExpiresAt)
-	if err != nil || time.Now().UTC().After(refreshExpiresAt) {
+	`, refreshHash).Scan(&sessionID, &userID, &refreshExpiresAt)
+	if err != nil {
+		// A hash present in the history with used_at set means an old refresh
+		// token was replayed. Revoke every session for the user so a stolen
+		// token cannot coexist with the legitimate rotated session.
+		var reusedUserID uuid.UUID
+		var usedAt *time.Time
+		historyErr := tx.QueryRow(ctx, `
+			SELECT user_id, used_at FROM session_refresh_tokens WHERE token_hash = $1
+		`, refreshHash).Scan(&reusedUserID, &usedAt)
+		if historyErr == nil && usedAt != nil {
+			_, _ = tx.Exec(ctx, `UPDATE sessions SET revoked_at = COALESCE(revoked_at, NOW()), last_used_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, reusedUserID)
+			_ = recordAudit(ctx, tx, &reusedUserID, "refresh_token_reuse_detected", nil, metadata)
+			_ = tx.Commit(ctx)
+		}
+		return Tokens{}, ErrInvalidRefreshToken
+	}
+	if time.Now().UTC().After(refreshExpiresAt) {
 		return Tokens{}, ErrInvalidRefreshToken
 	}
 
@@ -367,6 +384,12 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, metadata Req
 	`, tokenHash(accessToken), tokenHash(newRefreshToken), accessExpiresAt, newRefreshExpiresAt, now, sessionID); err != nil {
 		return Tokens{}, fmt.Errorf("rotate session: %w", err)
 	}
+	if _, err := tx.Exec(ctx, `UPDATE session_refresh_tokens SET used_at = $1 WHERE token_hash = $2 AND session_id = $3 AND used_at IS NULL`, now, refreshHash, sessionID); err != nil {
+		return Tokens{}, fmt.Errorf("mark refresh token used: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO session_refresh_tokens (token_hash, session_id, user_id, issued_at) VALUES ($1, $2, $3, $4)`, tokenHash(newRefreshToken), sessionID, userID, now); err != nil {
+		return Tokens{}, fmt.Errorf("store rotated refresh token: %w", err)
+	}
 	if err := recordAudit(ctx, tx, &userID, "refresh", map[string]any{"session_id": sessionID.String()}, metadata); err != nil {
 		return Tokens{}, fmt.Errorf("audit refresh: %w", err)
 	}
@@ -388,17 +411,20 @@ func (s *Service) Logout(ctx context.Context, accessToken string, metadata Reque
 	}
 	defer tx.Rollback(ctx)
 
-	var userID uuid.UUID
+	var sessionID, userID uuid.UUID
 	err = tx.QueryRow(ctx, `
 		UPDATE sessions SET revoked_at = NOW(), last_used_at = NOW()
 		WHERE access_token_hash = $1 AND revoked_at IS NULL
-		RETURNING user_id
-	`, tokenHash(accessToken)).Scan(&userID)
+		RETURNING id, user_id
+	`, tokenHash(accessToken)).Scan(&sessionID, &userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		return fmt.Errorf("revoke session: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE session_refresh_tokens SET used_at = COALESCE(used_at, NOW()) WHERE session_id = $1 AND used_at IS NULL`, sessionID); err != nil {
+		return fmt.Errorf("revoke session refresh tokens: %w", err)
 	}
 	if err := recordAudit(ctx, tx, &userID, "logout", nil, metadata); err != nil {
 		return fmt.Errorf("audit logout: %w", err)
@@ -453,6 +479,12 @@ func (s *Service) createSession(ctx context.Context, executor audit.Executor, us
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet, $9)
 	`, sessionID, user.ID, tokenHash(accessToken), tokenHash(refreshToken), accessExpiresAt, refreshExpiresAt, mfaVerifiedAt, nullableIP(metadata.IPAddress), truncate(metadata.UserAgent, 512)); err != nil {
 		return Tokens{}, fmt.Errorf("insert session: %w", err)
+	}
+	if _, err := executor.Exec(ctx, `
+		INSERT INTO session_refresh_tokens (token_hash, session_id, user_id, issued_at)
+		VALUES ($1, $2, $3, $4)
+	`, tokenHash(refreshToken), sessionID, user.ID, now); err != nil {
+		return Tokens{}, fmt.Errorf("store session refresh token: %w", err)
 	}
 	if err := recordAudit(ctx, executor, &user.ID, event, map[string]any{"session_id": sessionID.String()}, metadata); err != nil {
 		return Tokens{}, fmt.Errorf("audit session: %w", err)

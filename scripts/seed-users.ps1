@@ -1,5 +1,5 @@
 param(
-  [string]$Fixture = "$(Join-Path (Get-Location) 'datos-prueba-HNL.json')"
+  [string]$Fixture = "$(Join-Path (Get-Location) 'datos-prueba.json')"
 )
 
 $ErrorActionPreference = "Stop"

@@ -7,7 +7,7 @@ import { MFAVerificationPage } from "./features/auth/MFAVerificationPage";
 import { DashboardPage } from "./features/dashboard/DashboardPage";
 import { AssistantReply, AuthField, AuthFieldErrors, AuthForm, AuthMode, FormNotice, OAuthPending, OperationMode, Session, TransferTargetType } from "./types";
 import { clearStoredSession, readStoredSession, storeSession } from "./session";
-import { readThemeMode, resolveTheme } from "./theme";
+import { resolveTheme } from "./theme";
 import type { ThemeMode } from "./theme";
 import { currencyInputToMinor } from "./money";
 
@@ -42,6 +42,7 @@ function displayError(error: unknown): string {
       insufficient_funds: "Fondos insuficientes para completar la operación.",
       mfa_required: "Escribe el código de seis dígitos de tu autenticador.",
       mfa_invalid_code: "El código MFA no es válido o ya expiró. Revisa tu autenticador.",
+      mfa_locked: "El MFA quedó bloqueado temporalmente por varios intentos. Espera 15 minutos.",
       mfa_enrollment_expired: "El enrolamiento MFA expiró. Genera un QR nuevo.",
       mfa_already_enabled: "El MFA ya está activo para esta cuenta.",
       invalid_mcp_pin: "El PIN debe tener exactamente cuatro dígitos y coincidir con el configurado.",
@@ -95,7 +96,6 @@ function sessionFromTokens(tokens: { access_token: string; refresh_token: string
 }
 
 function App() {
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [session, setSession] = useState<Session | null>(() => readStoredSession());
   const [sessionReady, setSessionReady] = useState(false);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
@@ -154,17 +154,9 @@ function App() {
   const [mcpPinNotice, setMcpPinNotice] = useState<FormNotice | null>(null);
 
   useEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const applyTheme = () => {
-      document.documentElement.dataset.theme = resolveTheme(themeMode);
-    };
-    applyTheme();
-    if (themeMode === "system") {
-      media.addEventListener("change", applyTheme);
-    }
-    window.localStorage.setItem("hypernova.theme", themeMode);
-    return () => media.removeEventListener("change", applyTheme);
-  }, [themeMode]);
+    document.documentElement.dataset.theme = resolveTheme("light");
+    window.localStorage.removeItem("hypernova.theme");
+  }, []);
 
   function establishSession(nextSession: Session) {
     storeSession(nextSession);
@@ -386,7 +378,7 @@ function App() {
     setAccountBusy(true);
     setAccountNotice(null);
     try {
-      const account = await apiClient.createAccount({ currency: "USD" }, { accessToken: session.accessToken });
+      const account = await apiClient.createAccount({ currency: "USD" }, { accessToken: session.accessToken, idempotencyKey: createIdempotencyKey() });
       setAccounts((current) => [...current, account]);
       setSelectedAccountId(account.id);
       setAccountNotice({ tone: "success", message: "Tu nueva cuenta USD está lista." });
@@ -640,7 +632,7 @@ function App() {
   }
   if (!mfaGateReady || mfaStatus === null) return <MFAStatusLoading notice={mfaNotice} onLogout={handleLogout} />;
   if (!mfaStatus.enabled) return <MFAOnboarding user={session.user} enrollment={mfaEnrollment} code={mfaCode} busy={mfaBusy} loading={mfaLoading} notice={mfaNotice} onCodeChange={setMfaCode} onBegin={beginMFAEnrollment} onVerify={verifyMFAEnrollment} onLogout={handleLogout} />;
-  return <DashboardPage themeMode={themeMode} onThemeModeChange={setThemeMode} user={session.user} accounts={accounts} accountBalances={accountBalances} activeAccount={activeAccount} balance={balance} history={history} historyPage={historyPage} dashboardLoading={dashboardLoading} dashboardError={dashboardError} operationMode={operationMode} operationAmount={operationAmount} destinationAccountId={destinationAccountId} transferTargetType={transferTargetType} transferConfirmationPin={transferConfirmationPin} operationBusy={operationBusy} operationNotice={operationNotice} exportBusy={exportBusy} accountBusy={accountBusy} accountNotice={accountNotice} accountRenameBusyId={accountRenameBusyId} accountDeleteBusyId={accountDeleteBusyId} profileFullName={profileFullName || session.user.full_name} profileBusy={profileBusy} profileNotice={profileNotice} mcpError={mcpError} assistantInput={assistantInput} assistantReply={assistantReply} assistantConversation={assistantConversation} assistantAccountOptions={assistantAccountOptions} assistantBusy={assistantBusy} mcpAction={mcpAction} mcpActionBusy={mcpActionBusy} mcpActionNotice={mcpActionNotice} mcpPinConfigured={mcpPinConfigured} mcpPinExpiresAt={mcpPinExpiresAt} mcpPin={mcpPin} mcpConfirmationPin={mcpConfirmationPin} mcpPinBusy={mcpPinBusy} mcpPinNotice={mcpPinNotice} historyHasMore={Boolean(history?.has_more)} historyPageBusy={historyPageBusy} onAccountChange={(accountId) => { setSelectedAccountId(accountId); setDestinationAccountId(""); setAssistantConversation(null); setAssistantAccountOptions([]); }} onCreateAccount={() => void handleCreateAccount()} onRenameAccount={(accountId, displayName) => void handleRenameAccount(accountId, displayName)} onDeleteAccount={(accountId) => void handleDeleteAccount(accountId)} onOperationModeChange={(mode) => { setOperationMode(mode); setOperationNotice(null); }} onAmountChange={setOperationAmount} onDestinationChange={setDestinationAccountId} onTransferTargetTypeChange={(target) => { setTransferTargetType(target); setDestinationAccountId(""); setTransferConfirmationPin(""); }} onTransferConfirmationPinChange={(pin) => setTransferConfirmationPin(pin.replace(/\D/g, "").slice(0, 4))} onOperation={handleOperation} onExport={handleExport} onPreviousHistory={loadPreviousHistory} onNextHistory={loadMoreHistory} onAssistantInput={setAssistantInput} onAssistantSubmit={handleAssistantSubmit} onAssistantAccountSelect={handleAssistantAccountSelect} onPrepareMCPAction={(request) => void handlePrepareMCPAction(request)} onConfirmMCPAction={() => void handleConfirmMCPAction()} onCancelMCPAction={() => void handleCancelMCPAction()} onMCPPINChange={(pin) => setMcpPin(pin.replace(/\D/g, "").slice(0, 4))} onMCPConfirmationPINChange={(pin) => setMcpConfirmationPin(pin.replace(/\D/g, "").slice(0, 4))} onSetMCPPIN={handleSetMCPPIN} onProfileNameChange={setProfileFullName} onProfileSubmit={handleProfileSubmit} onLogout={handleLogout} />;
+  return <DashboardPage themeMode={"light" satisfies ThemeMode} onThemeModeChange={() => undefined} user={session.user} accounts={accounts} accountBalances={accountBalances} activeAccount={activeAccount} balance={balance} history={history} historyPage={historyPage} dashboardLoading={dashboardLoading} dashboardError={dashboardError} operationMode={operationMode} operationAmount={operationAmount} destinationAccountId={destinationAccountId} transferTargetType={transferTargetType} transferConfirmationPin={transferConfirmationPin} operationBusy={operationBusy} operationNotice={operationNotice} exportBusy={exportBusy} accountBusy={accountBusy} accountNotice={accountNotice} accountRenameBusyId={accountRenameBusyId} accountDeleteBusyId={accountDeleteBusyId} profileFullName={profileFullName || session.user.full_name} profileBusy={profileBusy} profileNotice={profileNotice} mcpError={mcpError} assistantInput={assistantInput} assistantReply={assistantReply} assistantConversation={assistantConversation} assistantAccountOptions={assistantAccountOptions} assistantBusy={assistantBusy} mcpAction={mcpAction} mcpActionBusy={mcpActionBusy} mcpActionNotice={mcpActionNotice} mcpPinConfigured={mcpPinConfigured} mcpPinExpiresAt={mcpPinExpiresAt} mcpPin={mcpPin} mcpConfirmationPin={mcpConfirmationPin} mcpPinBusy={mcpPinBusy} mcpPinNotice={mcpPinNotice} historyHasMore={Boolean(history?.has_more)} historyPageBusy={historyPageBusy} onAccountChange={(accountId) => { setSelectedAccountId(accountId); setDestinationAccountId(""); setAssistantConversation(null); setAssistantAccountOptions([]); }} onCreateAccount={() => void handleCreateAccount()} onRenameAccount={(accountId, displayName) => void handleRenameAccount(accountId, displayName)} onDeleteAccount={(accountId) => void handleDeleteAccount(accountId)} onOperationModeChange={(mode) => { setOperationMode(mode); setOperationNotice(null); }} onAmountChange={setOperationAmount} onDestinationChange={setDestinationAccountId} onTransferTargetTypeChange={(target) => { setTransferTargetType(target); setDestinationAccountId(""); setTransferConfirmationPin(""); }} onTransferConfirmationPinChange={(pin) => setTransferConfirmationPin(pin.replace(/\D/g, "").slice(0, 4))} onOperation={handleOperation} onExport={handleExport} onPreviousHistory={loadPreviousHistory} onNextHistory={loadMoreHistory} onAssistantInput={setAssistantInput} onAssistantSubmit={handleAssistantSubmit} onAssistantAccountSelect={handleAssistantAccountSelect} onPrepareMCPAction={(request) => void handlePrepareMCPAction(request)} onConfirmMCPAction={() => void handleConfirmMCPAction()} onCancelMCPAction={() => void handleCancelMCPAction()} onMCPPINChange={(pin) => setMcpPin(pin.replace(/\D/g, "").slice(0, 4))} onMCPConfirmationPINChange={(pin) => setMcpConfirmationPin(pin.replace(/\D/g, "").slice(0, 4))} onSetMCPPIN={handleSetMCPPIN} onProfileNameChange={setProfileFullName} onProfileSubmit={handleProfileSubmit} onLogout={handleLogout} />;
 }
 
 export default App;

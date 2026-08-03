@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestHealthEndpoints(t *testing.T) {
@@ -43,6 +45,37 @@ func TestReadinessFailsWithoutDatabase(t *testing.T) {
 	router.ServeHTTP(res, req)
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503, got %d", res.Code)
+	}
+}
+
+func TestRequestIDMiddlewarePreservesValidID(t *testing.T) {
+	expectedID := "11111111-1111-4111-8111-111111111111"
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := requestID(r); got != expectedID {
+			t.Errorf("expected request id in context %q, got %q", expectedID, got)
+		}
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("X-Request-ID", expectedID)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if got := res.Header().Get("X-Request-ID"); got != expectedID {
+		t.Fatalf("expected response request id %q, got %q", expectedID, got)
+	}
+}
+
+func TestRequestIDMiddlewareReplacesInvalidID(t *testing.T) {
+	handler := requestIDMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := uuid.Parse(requestID(r)); err != nil {
+			t.Errorf("expected UUID request id, got %q", requestID(r))
+		}
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("X-Request-ID", "spoofed\r\nvalue")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if _, err := uuid.Parse(res.Header().Get("X-Request-ID")); err != nil {
+		t.Fatalf("expected generated UUID request id, got %q", res.Header().Get("X-Request-ID"))
 	}
 }
 

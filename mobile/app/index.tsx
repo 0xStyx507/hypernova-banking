@@ -17,13 +17,10 @@ type AuthMode = "login" | "register";
 interface Session { accessToken: string; refreshToken: string; user: User }
 
 const sessionKey = "hypernova.mobile.session";
-const themeKey = "hypernova.mobile.theme";
-type ThemeMode = "system" | "light" | "dark";
 
 /** Mobile entry screen: authentication, balance, operations, history and MFA. */
 export default function HomeScreen() {
   const colorScheme = useNativeColorScheme();
-  const [themeMode, setThemeMode] = useState<ThemeMode>("system");
   const [session, setSession] = useState<Session | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authNeedsMFA, setAuthNeedsMFA] = useState(false);
@@ -69,14 +66,10 @@ export default function HomeScreen() {
 
   useEffect(() => {
     void restoreSession();
-    void SecureStore.getItemAsync(themeKey).then((saved) => {
-      if (saved === "light" || saved === "dark" || saved === "system") setThemeMode(saved);
-    });
   }, []);
   useEffect(() => {
-    colorScheme.setColorScheme(themeMode);
-    void SecureStore.setItemAsync(themeKey, themeMode);
-  }, [colorScheme, themeMode]);
+    colorScheme.setColorScheme("light");
+  }, [colorScheme]);
   useEffect(() => {
     const consumeOAuthUrl = (url: string) => {
       const query = new URL(url).searchParams;
@@ -176,7 +169,7 @@ export default function HomeScreen() {
   async function createAccount() {
     if (!session) return;
     setAccountBusy(true); setAccountNotice("");
-    try { const created = await mobileApi.createAccount(session.accessToken); const nextAccounts = [...accounts, created]; setAccounts(nextAccounts); setAccount(created); await loadAccountData(created.id, session.accessToken); setAccountNotice("Tu nueva cuenta USD está lista."); }
+    try { const created = await mobileApi.createAccount(session.accessToken, createIdempotencyKey()); const nextAccounts = [...accounts, created]; setAccounts(nextAccounts); setAccount(created); await loadAccountData(created.id, session.accessToken); setAccountNotice("Tu nueva cuenta USD está lista."); }
     catch (error) { setAccountNotice(publicError(error)); }
     finally { setAccountBusy(false); }
   }
@@ -294,7 +287,7 @@ export default function HomeScreen() {
 
   if (!mfaStatus.enabled) return <MFAOnboarding user={session.user} enrollment={mfaEnrollment} code={mfaCode} busy={mfaBusy} loading={mfaLoading} notice={notice} onCodeChange={setMfaCode} onBegin={beginMFA} onVerify={verifyMFA} onLogout={logout} />;
 
-  return <MobileDashboard themeMode={themeMode} onThemeModeChange={setThemeMode} user={session.user} accessToken={session.accessToken} accounts={accounts} accountBalances={accountBalances} activeAccount={account} balance={balance} history={history} historyPage={historyPage} historyBusy={historyBusy} hasMoreHistory={Boolean(history?.has_more)} section={section} operationMode={mode} operationAmount={amount} destinationAccountId={destination} transferTargetType={transferTargetType} transferConfirmationPin={transferConfirmationPin} operationBusy={busy} notice={notice} accountBusy={accountBusy} accountNotice={accountNotice} accountRenameBusyId={accountRenameBusyId} profileFullName={profileFullName || session.user.full_name} profileBusy={profileBusy} profileNotice={profileNotice} mcpPin={mcpPin} mcpPinConfigured={mcpPinConfigured} mcpPinBusy={mcpPinBusy} mcpPinNotice={mcpPinNotice} mcpActionPending={mcpActionPending} mcpAction={mcpAction} onNavigate={navigateDashboard} onAccountChange={(accountId) => { void selectAccount(accountId); }} onCreateAccount={() => { void createAccount(); }} onRenameAccount={(accountId, name) => { void renameAccount(accountId, name); }} onOperationModeChange={(nextMode) => { setMode(nextMode); setNotice(""); }} onAmountChange={setAmount} onDestinationChange={setDestination} onTransferTargetTypeChange={(target) => { setTransferTargetType(target); setDestination(""); setTransferConfirmationPin(""); }} onTransferConfirmationPinChange={(pin) => setTransferConfirmationPin(pin)} onOperation={() => { void submitOperation(); }} onNextHistory={() => { void nextHistory(); }} onPreviousHistory={previousHistory} onProfileNameChange={setProfileFullName} onProfileSubmit={() => { void updateProfile(); }} onMCPPINChange={(pin) => setMcpPin(pin.replace(/\D/g, "").slice(0, 4))} onSetMCPPIN={() => { void saveMCPPIN(); }} onLogout={() => { void logout(); }} onMCPActionPendingChange={setMcpActionPending} onMCPActionExpired={() => { setMcpAction(null); setMcpActionPending(false); setNotice("La operación pendiente expiró. Puedes iniciar otra operación."); }} onMCPActionConfirmed={(action) => { setMcpAction(action); setMcpActionPending(false); const accountID = action.payload.account_id || action.payload.source_account_id; const selected = accountID ? accounts.find((item) => item.id === accountID) : undefined; if (selected && session) { setAccount(selected); void loadAccountData(selected.id, session.accessToken).then(() => new Promise((resolve) => setTimeout(resolve, 250))).then(() => loadAccountData(selected.id, session.accessToken)); } else if (session) void loadDashboard(session); }} />;
+  return <MobileDashboard user={session.user} accessToken={session.accessToken} accounts={accounts} accountBalances={accountBalances} activeAccount={account} balance={balance} history={history} historyPage={historyPage} historyBusy={historyBusy} hasMoreHistory={Boolean(history?.has_more)} section={section} operationMode={mode} operationAmount={amount} destinationAccountId={destination} transferTargetType={transferTargetType} transferConfirmationPin={transferConfirmationPin} operationBusy={busy} notice={notice} accountBusy={accountBusy} accountNotice={accountNotice} accountRenameBusyId={accountRenameBusyId} profileFullName={profileFullName || session.user.full_name} profileBusy={profileBusy} profileNotice={profileNotice} mcpPin={mcpPin} mcpPinConfigured={mcpPinConfigured} mcpPinBusy={mcpPinBusy} mcpPinNotice={mcpPinNotice} mcpActionPending={mcpActionPending} mcpAction={mcpAction} onNavigate={navigateDashboard} onAccountChange={(accountId) => { void selectAccount(accountId); }} onCreateAccount={() => { void createAccount(); }} onRenameAccount={(accountId, name) => { void renameAccount(accountId, name); }} onOperationModeChange={(nextMode) => { setMode(nextMode); setNotice(""); }} onAmountChange={setAmount} onDestinationChange={setDestination} onTransferTargetTypeChange={(target) => { setTransferTargetType(target); setDestination(""); setTransferConfirmationPin(""); }} onTransferConfirmationPinChange={(pin) => setTransferConfirmationPin(pin)} onOperation={() => { void submitOperation(); }} onNextHistory={() => { void nextHistory(); }} onPreviousHistory={previousHistory} onProfileNameChange={setProfileFullName} onProfileSubmit={() => { void updateProfile(); }} onMCPPINChange={(pin) => setMcpPin(pin.replace(/\D/g, "").slice(0, 4))} onSetMCPPIN={() => { void saveMCPPIN(); }} onLogout={() => { void logout(); }} onMCPActionPendingChange={setMcpActionPending} onMCPActionExpired={() => { setMcpAction(null); setMcpActionPending(false); setNotice("La operación pendiente expiró. Puedes iniciar otra operación."); }} onMCPActionConfirmed={(action) => { setMcpAction(action); setMcpActionPending(false); const accountID = action.payload.account_id || action.payload.source_account_id; const selected = accountID ? accounts.find((item) => item.id === accountID) : undefined; if (selected && session) { setAccount(selected); void loadAccountData(selected.id, session.accessToken).then(() => new Promise((resolve) => setTimeout(resolve, 250))).then(() => loadAccountData(selected.id, session.accessToken)); } else if (session) void loadDashboard(session); }} />;
 }
 
 
@@ -304,6 +297,7 @@ function publicError(error: unknown): string {
     if (error.body.code === "demo_deposit_disabled") return "El depósito demo está desactivado en este entorno.";
     if (error.body.code === "mfa_required") return "Escribe el código de tu autenticador para continuar.";
     if (error.body.code === "mfa_invalid_code") return "El código MFA no es válido o expiró.";
+    if (error.body.code === "mfa_locked") return "El MFA está bloqueado temporalmente. Espera 15 minutos.";
     if (error.body.code === "mcp_pin_error" || error.body.code === "mcp_pin_unavailable") return "No pudimos guardar tu PIN de confirmación. Inténtalo nuevamente.";
     if (error.body.code === "mcp_pin_not_configured") return "Configura tu PIN en Ajustes antes de confirmar una operación.";
     if (error.body.code === "mcp_pin_expired") return "Tu PIN venció. Genera uno nuevo en Ajustes.";

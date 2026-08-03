@@ -13,7 +13,7 @@ PostgreSQL stores only the information required to operate the API safely:
 ## Monetary representation
 
 The public API accepts and returns positive integer minor units as decimal
-strings. The current supported currency is HNL. Floating-point values and
+strings. The current supported currency is USD. Floating-point values and
 ambiguous decimal amounts are rejected.
 
 ## Account invariants
@@ -45,9 +45,20 @@ An uncertain client response is recorded as `unknown`, not as a failed
 movement; a recent concurrent request receives `409 Conflict` and an older
 unknown reservation can be reconciled with the original identifier.
 
+At startup, the API marks processing reservations older than 30 seconds as
+`unknown` and checks up to 500 unresolved operations against TigerBeetle. A
+matching immutable transfer is completed in PostgreSQL, a mismatched transfer
+is marked rejected, and an absent transfer remains `unknown` for a later retry.
+The startup log reports each count without exposing financial secrets.
+
 ## Operational limitations
 
-The first ledger release supports HNL checking accounts and recent history
+The first ledger release supports USD checking accounts and recent history
 with a maximum page size of 100. History accepts a timestamp cursor and can be
 exported as a bounded CSV. The API has a local per-IP rate limit; a distributed
 deployment should move that control to a shared edge or gateway.
+
+If an active PostgreSQL account is missing from TigerBeetle, startup fails by
+default. Recreating it with a zero balance requires the explicit development
+flag `LEDGER_ALLOW_MISSING_ACCOUNT_RECREATION`; production recovery must use a
+validated TigerBeetle backup or operator-approved reconciliation.

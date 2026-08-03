@@ -144,6 +144,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: MFA bloqueado temporalmente tras varios intentos fallidos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '503':
           description: MFA configurado pero no disponible
           content:
@@ -352,6 +358,9 @@ paths:
         '401':
           description: Código expirado, inválido o MFA incorrecto/requerido
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '429':
+          description: MFA bloqueado temporalmente tras varios intentos fallidos
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
         '500':
           description: Error interno de autenticación
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
@@ -465,6 +474,8 @@ paths:
       description: Cada cuenta pertenece al usuario autenticado y puede seleccionarse como origen de una operación. La identidad recibe una cuenta inicial durante el registro.
       tags: [Ledger]
       security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: false
         content:
@@ -483,6 +494,9 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
         '401':
           description: Token inválido o ausente
+          content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
+        '409':
+          description: La clave de idempotencia fue reutilizada con otra intención
           content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } }
     get:
       operationId: listAccounts
