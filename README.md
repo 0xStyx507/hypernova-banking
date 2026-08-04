@@ -157,6 +157,17 @@ El modelo financiero y sus invariantes están documentados en
 [`docs/ledger.md`](docs/ledger.md). PostgreSQL no es la fuente de verdad de
 saldos.
 
+## Contratos y organización
+
+El fixture versionado `datos-prueba.json` se valida e importa de forma
+idempotente en las tablas de staging. El staging conserva cuentas y movimientos
+de origen sin alterar saldos: TigerBeetle sigue siendo la única fuente de
+verdad financiera.
+
+El contrato MCP v2, sus herramientas de búsqueda y resúmenes están documentados
+en [`docs/mcp.md`](docs/mcp.md). Las reglas de módulos, dependencias y pruebas
+DDD están en [`docs/ddd.md`](docs/ddd.md).
+
 ## Decisiones
 
 - Monolito modular; no se agregan microservicios, colas, Redis, Kubernetes ni Terraform.

@@ -1,36 +1,28 @@
 import { Text, View } from "react-native";
 import { Transaction, formatMinor } from "../../api";
 
-function isIncoming(item: Transaction): boolean {
-  return item.type === "deposit" || item.direction === "credit";
+function isIncoming(item: Transaction): boolean { return item.type === "deposit" || item.direction === "credit"; }
+
+function amountRatio(item: Transaction, maximum: bigint): number {
+  try { return maximum > 0n ? Number(BigInt(item.amount) * 100n / maximum) / 100 : 0; } catch { return 0; }
 }
 
-/** Compact, color-coded activity chart that remains legible in light and dark themes. */
-export function TransactionChart({ transactions }: { transactions: Transaction[] }) {
-  const points = transactions.slice(0, 5).reverse();
-  if (!points.length) return null;
-  let max = 1n;
-  for (const item of points) {
-    try { const amount = BigInt(item.amount); if (amount > max) max = amount; } catch { /* Display fallback stays at the minimum bar height. */ }
-  }
-
-  return <View className="mt-5 rounded-3xl border border-slate-200 bg-[#fbfdff] p-4 dark:border-slate-700 dark:bg-[#142235]">
-    <Text className="text-xs font-bold uppercase tracking-[2px] text-slate-400">Resumen visual</Text>
-    <Text className="mt-1 text-lg font-semibold text-[#2d73a5] dark:text-[#7bc7ec]">Entradas y salidas</Text>
-    <View className="mt-5 h-40 flex-row items-end justify-between gap-2">
-      {points.map((item) => {
-        let amount = 0n;
-        try { amount = BigInt(item.amount); } catch { /* Keep the bar visible for malformed display data. */ }
-        const height = Math.max(14, Number((amount * 100n) / max));
-        const incoming = isIncoming(item);
-        const barColor = incoming ? "#16c1b5" : "#8b5cf6";
-        return <View className="flex-1 items-center" key={`${item.transfer_id}-chart`}>
-          <Text className="mb-1 text-[9px] font-semibold text-slate-500 dark:text-slate-300" numberOfLines={1}>{formatMinor(item.amount)}</Text>
-          <View className="w-full flex-1 justify-end rounded-t-xl bg-slate-200 dark:bg-slate-700"><View className="w-full rounded-t-xl" style={{ height: `${height}%`, backgroundColor: barColor }} /></View>
-          <Text className="mt-1 text-[9px] text-slate-500 dark:text-slate-300">{new Date(item.created_at).toLocaleDateString("es-PA", { day: "2-digit", month: "short" })}</Text>
-        </View>;
-      })}
-    </View>
-    <View className="mt-4 flex-row flex-wrap gap-x-5 gap-y-2"><View className="flex-row items-center"><View className="h-3 w-3 rounded-sm bg-[#16c1b5]" /><Text className="ml-2 text-xs font-semibold text-slate-600 dark:text-slate-200">Depósitos</Text></View><View className="flex-row items-center"><View className="h-3 w-3 rounded-sm bg-[#8b5cf6]" /><Text className="ml-2 text-xs font-semibold text-slate-600 dark:text-slate-200">Retiros y transferencias</Text></View></View>
+function LineLane({ items, incoming }: { items: Transaction[]; incoming: boolean }) {
+  const maximum = items.reduce((current, item) => { try { const amount = BigInt(item.amount); return amount > current ? amount : current; } catch { return current; } }, 1n);
+  const points = items.map((item, index) => ({ x: items.length <= 1 ? 50 : 4 + (index * 92) / (items.length - 1), y: incoming ? 82 - amountRatio(item, maximum) * 64 : 18 + amountRatio(item, maximum) * 64 }));
+  return <View className="relative mt-2 h-20 overflow-hidden rounded-xl bg-[#f4f8fb] dark:bg-[#17264b]">
+    <View className="absolute inset-x-2 top-1/2 h-px bg-[#d9e4ed] dark:bg-[#304979]" />
+    {points.slice(1).map((point, index) => { const previous = points[index]; const dx = point.x - previous.x; const dy = point.y - previous.y; const length = Math.sqrt(dx * dx + dy * dy); const angle = Math.atan2(dy, dx) * (180 / Math.PI); return <View className={`absolute h-[2px] rounded-full ${incoming ? "bg-[#14c7bc]" : "bg-[#7b35cc]"}`} key={`${items[index].transfer_id}-segment`} style={{ left: `${previous.x}%`, top: `${previous.y}%`, transform: [{ rotate: `${angle}deg` }], width: `${length}%` }} />; })}
+    {points.map((point, index) => <View className={`absolute h-2.5 w-2.5 rounded-full border-2 border-white dark:border-[#17264b] ${incoming ? "bg-[#14c7bc]" : "bg-[#7b35cc]"}`} key={`${items[index].transfer_id}-point`} style={{ left: `${point.x}%`, top: `${point.y}%` }} />)}
   </View>;
+}
+
+/** Compact home/history chart with separate rising deposits and falling withdrawals. */
+export function TransactionChart({ transactions }: { transactions: Transaction[] }) {
+  const points = transactions.slice(0, 6).reverse();
+  const deposits = points.filter(isIncoming);
+  const withdrawals = points.filter((item) => !isIncoming(item));
+  if (!points.length) return null;
+  return <View className="mt-5 rounded-3xl border border-[#d9e4ed] bg-white p-4 dark:border-[#2d456e] dark:bg-[#1b2a55]
+    "><View className="flex-row items-center justify-between"><View><Text className="text-xs font-bold uppercase tracking-[2px] text-slate-400 dark:text-[#9fb0c5]">Actividad financiera</Text><Text className="mt-1 text-base font-bold text-[#24315e] dark:text-[#f6f8fc]">Depositos y retiros</Text></View><View className="items-end"><Text className="text-[10px] font-bold text-[#14c7bc]">Depositos ↑</Text><Text className="mt-1 text-[10px] font-bold text-[#7b35cc]">Retiros ↓</Text></View></View>{deposits.length ? <LineLane items={deposits} incoming /> : null}{withdrawals.length ? <LineLane items={withdrawals} incoming={false} /> : null}<View className="mt-3 flex-row justify-between"><Text className="text-[9px] text-slate-400 dark:text-[#9fb0c5]">{points[0] ? formatMinor(points[0].amount) : ""}</Text><Text className="text-[9px] text-slate-400 dark:text-[#9fb0c5]">{points[points.length - 1] ? formatMinor(points[points.length - 1].amount) : ""}</Text></View></View>;
 }

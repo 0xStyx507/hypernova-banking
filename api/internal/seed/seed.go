@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,20 +37,28 @@ type userRecord struct {
 }
 
 type accountRecord struct {
-	AccountNumber string `json:"account_number"`
-	UserID        string `json:"user_id"`
+	AccountNumber  string      `json:"account_number"`
+	UserID         string      `json:"user_id"`
+	InitialBalance json.Number `json:"initial_balance"`
+	Currency       string      `json:"currency"`
+	AccountType    string      `json:"account_type"`
 }
 
 type transactionRecord struct {
-	FromAccount string `json:"from_account"`
-	ToAccount   string `json:"to_account"`
+	FromAccount string      `json:"from_account"`
+	ToAccount   string      `json:"to_account"`
+	Amount      json.Number `json:"amount"`
+	Type        string      `json:"type"`
+	Description string      `json:"description"`
+	Timestamp   string      `json:"timestamp"`
+	Status      string      `json:"status"`
 }
 
 // Report summarizes work without printing credentials or fixture contents.
 type Report struct {
 	UsersProcessed       int
-	AccountsDeferred     int
-	TransactionsDeferred int
+	AccountsImported     int
+	TransactionsImported int
 }
 
 // DuplicateReport is a safe reconciliation report. It identifies source row
@@ -82,6 +93,10 @@ func Run(ctx context.Context, pool *pgxpool.Pool, filePath string, bcryptCost in
 	if err := validateUniqueEmails(input.Users); err != nil {
 		return Report{}, err
 	}
+	accounts, transactions, err := prepareFinancialFixture(input)
+	if err != nil {
+		return Report{}, err
+	}
 	prepared := make([]preparedUser, 0, len(input.Users))
 	for _, record := range input.Users {
 		user, err := prepareUser(record, bcryptCost)
@@ -106,13 +121,141 @@ func Run(ctx context.Context, pool *pgxpool.Pool, filePath string, bcryptCost in
 			return Report{}, fmt.Errorf("insert seed user %s: %w", user.ID, err)
 		}
 	}
+	for _, account := range accounts {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO fixture_accounts (account_number, user_id, initial_balance_minor, currency, account_type)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (account_number) DO UPDATE SET user_id = EXCLUDED.user_id,
+				initial_balance_minor = EXCLUDED.initial_balance_minor, currency = EXCLUDED.currency,
+				account_type = EXCLUDED.account_type, imported_at = NOW()
+		`, account.AccountNumber, account.UserID, account.InitialBalanceMinor, account.Currency, account.AccountType)
+		if err != nil {
+			return Report{}, fmt.Errorf("insert fixture account %s: %w", account.AccountNumber, err)
+		}
+	}
+	for _, transaction := range transactions {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO fixture_transactions (source_key, from_account, to_account, amount_minor, operation_type, description, occurred_at, status, currency)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (source_key) DO UPDATE SET from_account = EXCLUDED.from_account,
+				to_account = EXCLUDED.to_account, amount_minor = EXCLUDED.amount_minor,
+				operation_type = EXCLUDED.operation_type, description = EXCLUDED.description,
+				occurred_at = EXCLUDED.occurred_at, status = EXCLUDED.status, currency = EXCLUDED.currency,
+				imported_at = NOW()
+		`, transaction.SourceKey, transaction.FromAccount, transaction.ToAccount, transaction.AmountMinor, transaction.OperationType, transaction.Description, transaction.OccurredAt, transaction.Status, transaction.Currency)
+		if err != nil {
+			return Report{}, fmt.Errorf("insert fixture transaction %s: %w", transaction.SourceKey, err)
+		}
+	}
 	if err := audit.Record(ctx, tx, nil, "seed_users", map[string]any{"users_processed": len(prepared)}, "", ""); err != nil {
 		return Report{}, fmt.Errorf("audit seed: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Report{}, fmt.Errorf("commit seed: %w", err)
 	}
-	return Report{UsersProcessed: len(prepared), AccountsDeferred: len(input.Accounts), TransactionsDeferred: len(input.Transactions)}, nil
+	return Report{UsersProcessed: len(prepared), AccountsImported: len(accounts), TransactionsImported: len(transactions)}, nil
+}
+
+type preparedAccount struct {
+	AccountNumber       string
+	UserID              uuid.UUID
+	InitialBalanceMinor int64
+	Currency            string
+	AccountType         string
+}
+
+type preparedTransaction struct {
+	SourceKey     string
+	FromAccount   string
+	ToAccount     string
+	AmountMinor   int64
+	OperationType string
+	Description   string
+	OccurredAt    time.Time
+	Status        string
+	Currency      string
+}
+
+func prepareFinancialFixture(input fixture) ([]preparedAccount, []preparedTransaction, error) {
+	users := make(map[string]struct{}, len(input.Users))
+	for _, user := range input.Users {
+		users[user.ID] = struct{}{}
+	}
+	accounts := make([]preparedAccount, 0, len(input.Accounts))
+	accountNumbers := make(map[string]struct{}, len(input.Accounts))
+	for _, record := range input.Accounts {
+		if strings.TrimSpace(record.AccountNumber) == "" {
+			return nil, nil, fmt.Errorf("fixture account number is required")
+		}
+		if _, exists := accountNumbers[record.AccountNumber]; exists {
+			return nil, nil, fmt.Errorf("fixture contains duplicate account %s", record.AccountNumber)
+		}
+		if _, exists := users[record.UserID]; !exists {
+			return nil, nil, fmt.Errorf("fixture account %s references unknown user", record.AccountNumber)
+		}
+		currency := strings.ToUpper(strings.TrimSpace(record.Currency))
+		if currency == "" {
+			currency = "USD"
+		}
+		if currency != "USD" || (record.AccountType != "checking" && record.AccountType != "savings") {
+			return nil, nil, fmt.Errorf("fixture account %s has unsupported currency or type", record.AccountNumber)
+		}
+		balance, err := decimalToMinor(record.InitialBalance)
+		if err != nil || balance < 0 {
+			return nil, nil, fmt.Errorf("fixture account %s has invalid initial balance", record.AccountNumber)
+		}
+		userID, err := uuid.Parse(record.UserID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fixture account %s has invalid user id", record.AccountNumber)
+		}
+		accounts = append(accounts, preparedAccount{AccountNumber: record.AccountNumber, UserID: userID, InitialBalanceMinor: balance, Currency: currency, AccountType: record.AccountType})
+		accountNumbers[record.AccountNumber] = struct{}{}
+	}
+	transactions := make([]preparedTransaction, 0, len(input.Transactions))
+	for index, record := range input.Transactions {
+		if _, ok := accountNumbers[record.FromAccount]; !ok && record.FromAccount != "EXTERNAL" {
+			return nil, nil, fmt.Errorf("fixture transaction %d references unknown source account", index+1)
+		}
+		if _, ok := accountNumbers[record.ToAccount]; !ok && record.ToAccount != "EXTERNAL" {
+			return nil, nil, fmt.Errorf("fixture transaction %d references unknown destination account", index+1)
+		}
+		amount, err := decimalToMinor(record.Amount)
+		if err != nil || amount <= 0 {
+			return nil, nil, fmt.Errorf("fixture transaction %d has invalid amount", index+1)
+		}
+		typeName := strings.ToLower(strings.TrimSpace(record.Type))
+		if typeName != "deposit" && typeName != "withdrawal" && typeName != "transfer" {
+			return nil, nil, fmt.Errorf("fixture transaction %d has invalid type", index+1)
+		}
+		status := strings.ToLower(strings.TrimSpace(record.Status))
+		if status == "" {
+			status = "completed"
+		}
+		if status != "completed" && status != "pending" && status != "failed" {
+			return nil, nil, fmt.Errorf("fixture transaction %d has invalid status", index+1)
+		}
+		occurred, err := time.Parse(time.RFC3339, record.Timestamp)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fixture transaction %d has invalid timestamp", index+1)
+		}
+		transactions = append(transactions, preparedTransaction{SourceKey: strconv.Itoa(index + 1), FromAccount: record.FromAccount, ToAccount: record.ToAccount, AmountMinor: amount, OperationType: typeName, Description: strings.TrimSpace(record.Description), OccurredAt: occurred.UTC(), Status: status, Currency: "USD"})
+	}
+	return accounts, transactions, nil
+}
+
+func decimalToMinor(value json.Number) (int64, error) {
+	if strings.TrimSpace(value.String()) == "" {
+		return 0, fmt.Errorf("amount is required")
+	}
+	rat, ok := new(big.Rat).SetString(value.String())
+	if !ok {
+		return 0, fmt.Errorf("invalid decimal")
+	}
+	rat.Mul(rat, big.NewRat(100, 1))
+	if rat.Denom().Cmp(big.NewInt(1)) != 0 || !rat.IsInt() || !rat.Num().IsInt64() {
+		return 0, fmt.Errorf("amount has more than two decimals")
+	}
+	return rat.Num().Int64(), nil
 }
 
 // DuplicateReportFromFile loads a fixture and summarizes email collisions
@@ -154,6 +297,7 @@ func loadFixture(filePath string) (fixture, error) {
 	defer file.Close()
 	var input fixture
 	decoder := json.NewDecoder(file)
+	decoder.UseNumber()
 	if err := decoder.Decode(&input); err != nil {
 		return fixture{}, fmt.Errorf("decode fixture: %w", err)
 	}

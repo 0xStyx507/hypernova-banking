@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Hypernova Banking API
-  version: 1.0.0
+  version: 2.0.0
   license:
     name: Proprietary technical assessment implementation
     url: https://github.com/0xStyx507/hypernova-banking
@@ -14,6 +14,7 @@ info:
 servers:
   - url: http://127.0.0.1:8080
     description: Desarrollo local
+x-mcp-protocol-version: hypernova-mcp-http/2
 # Public health and authentication operations opt in to security below; an
 # empty root requirement makes the security posture explicit for every path.
 security: []
@@ -1255,11 +1256,12 @@ components:
         name: { type: string }
         read_only: { type: boolean }
         description: { type: string }
+        input_schema: { type: object, additionalProperties: true }
     MCPToolsResponse:
       type: object
       required: [protocol, tools]
       properties:
-        protocol: { type: string, example: hypernova-mcp-http/1 }
+        protocol: { type: string, example: hypernova-mcp-http/2 }
         tools:
           type: array
           items: { $ref: '#/components/schemas/MCPTool' }
@@ -1306,11 +1308,17 @@ components:
         name: { type: string, example: get_accounts }
         arguments:
           type: object
-          description: Para get_transactions se aceptan account_id, limit (1..100) y cursor. Para get_balance solo account_id.
+          description: Para búsquedas se aceptan account_id, filtros type/direction/from/to/min_amount/max_amount y limit. Las fechas usan RFC3339 y los montos son unidades menores.
           properties:
             account_id: { type: string, format: uuid }
             limit: { type: integer, minimum: 1, maximum: 100, default: 50 }
             cursor: { type: string, description: Cursor opaco devuelto por la página anterior }
+            type: { type: string, enum: [deposit, withdrawal, transfer] }
+            direction: { type: string, enum: [credit, debit] }
+            from: { type: string, format: date-time }
+            to: { type: string, format: date-time }
+            min_amount: { type: string, pattern: '^[0-9]+$' }
+            max_amount: { type: string, pattern: '^[0-9]+$' }
           additionalProperties: false
     MCPToolCallResponse:
       type: object

@@ -25,3 +25,9 @@ export function maskEmail(email: string): string {
 export function sanitizeMfaCode(value: string): string {
   return value.replace(/\D/g, "").slice(0, 6);
 }
+
+/** Validates the email shape locally; mailbox ownership requires verification. */
+export function isValidEmail(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/u.test(normalized);
+}

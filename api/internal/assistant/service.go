@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/hypernova-banking/api/internal/mcp"
@@ -27,6 +26,7 @@ type Provider interface {
 type ProviderResponse struct {
 	Text                 string
 	ReadOnlyTool         string
+	ReadOnlyArguments    map[string]any
 	FinancialAction      *mcp.ActionRequest
 	RequiresConfirmation bool
 }
@@ -42,6 +42,12 @@ func (LocalProvider) Complete(_ context.Context, message string) (ProviderRespon
 		return ProviderResponse{}, ErrInvalidMessage
 	}
 	lower := strings.ToLower(message)
+	if strings.Contains(lower, "flujo") || strings.Contains(lower, "gast") || strings.Contains(lower, "ingres") || strings.Contains(lower, "cuánto recib") || strings.Contains(lower, "cuanto recib") {
+		return ProviderResponse{Text: "Consultaré el resumen de entradas y salidas USD.", ReadOnlyTool: "get_cashflow_summary"}, nil
+	}
+	if strings.Contains(lower, "buscar") || strings.Contains(lower, "encuentra") || strings.Contains(lower, "filtra") {
+		return ProviderResponse{Text: "Buscaré los movimientos que coincidan con tu consulta.", ReadOnlyTool: "search_transactions"}, nil
+	}
 	if strings.Contains(lower, "saldo") || strings.Contains(lower, "balance") {
 		return ProviderResponse{Text: "Consultaré tu saldo USD mediante una herramienta de solo lectura.", ReadOnlyTool: "get_balance"}, nil
 	}
@@ -70,12 +76,9 @@ var (
 func parseFinancialAction(message string) (mcp.ActionRequest, error) {
 	lower := strings.ToLower(message)
 	withoutUUIDs := uuidPattern.ReplaceAllString(lower, " ")
-	amountMatch := amountPattern.FindString(withoutUUIDs)
-	if amountMatch == "" {
-		return mcp.ActionRequest{}, fmt.Errorf("Indica el monto en unidades menores, por ejemplo 2500 para USD 25.00.")
-	}
-	if _, err := strconv.ParseInt(amountMatch, 10, 64); err != nil {
-		return mcp.ActionRequest{}, fmt.Errorf("El monto no es válido. Revísalo e inténtalo nuevamente.")
+	amountMatch, amountErr := parseConversationalAmount(withoutUUIDs)
+	if amountErr != nil {
+		return mcp.ActionRequest{}, amountErr
 	}
 	ids := uuidPattern.FindAllString(message, -1)
 	request := mcp.ActionRequest{Amount: amountMatch, Currency: "USD"}
@@ -194,7 +197,7 @@ func (s *Service) Chat(ctx context.Context, accessToken, message, selectedAccoun
 			return s.pendingConversation(ctx, accessToken, state, result)
 		}
 	}
-	if response.FinancialAction == nil && response.ReadOnlyTool != "get_accounts" && response.ReadOnlyTool != "get_balance" && response.ReadOnlyTool != "get_transactions" {
+	if response.FinancialAction == nil && response.ReadOnlyTool != "get_accounts" && response.ReadOnlyTool != "get_balance" && response.ReadOnlyTool != "get_transactions" && response.ReadOnlyTool != "search_transactions" && response.ReadOnlyTool != "get_cashflow_summary" {
 		if pending := inferConversation(message, ""); pending != nil {
 			return s.pendingConversation(ctx, accessToken, *pending, result)
 		}
@@ -266,7 +269,7 @@ func (s *Service) Chat(ctx context.Context, accessToken, message, selectedAccoun
 		result.ReadOnlyData = accounts
 		return result, nil
 	}
-	if response.ReadOnlyTool != "get_transactions" && response.ReadOnlyTool != "get_balance" {
+	if response.ReadOnlyTool != "get_transactions" && response.ReadOnlyTool != "get_balance" && response.ReadOnlyTool != "search_transactions" && response.ReadOnlyTool != "get_cashflow_summary" {
 		return result, nil
 	}
 	if len(accountResult.Items) == 0 {
@@ -274,11 +277,14 @@ func (s *Service) Chat(ctx context.Context, accessToken, message, selectedAccoun
 		result.Message = "No tienes cuentas activas disponibles para consultar."
 		return result, nil
 	}
-	tool := "get_balance"
-	if response.ReadOnlyTool == "get_transactions" {
-		tool = "get_transactions"
+	tool := response.ReadOnlyTool
+	if tool == "" {
+		tool = "get_balance"
 	}
 	arguments := map[string]any{"account_id": accountID}
+	for key, value := range response.ReadOnlyArguments {
+		arguments[key] = value
+	}
 	if tool == "get_transactions" {
 		arguments["limit"] = 5
 	}
@@ -292,10 +298,14 @@ func (s *Service) Chat(ctx context.Context, accessToken, message, selectedAccoun
 
 func amountOnly(message string) string {
 	value := strings.TrimSpace(message)
-	if !amountOnlyPattern.MatchString(value) {
+	if amountOnlyPattern.MatchString(value) {
+		return value
+	}
+	amount, err := parseConversationalAmount(value)
+	if err != nil {
 		return ""
 	}
-	return value
+	return amount
 }
 
 func inferConversation(message, selectedAccountID string) *ConversationState {
@@ -319,11 +329,11 @@ func inferConversation(message, selectedAccountID string) *ConversationState {
 }
 
 func amountFromMessage(message string) string {
-	match := amountPattern.FindString(uuidPattern.ReplaceAllString(strings.ToLower(message), " "))
-	if match == "" {
+	amount, err := parseConversationalAmount(message)
+	if err != nil {
 		return ""
 	}
-	return match
+	return amount
 }
 
 func actionFromConversation(state ConversationState) *mcp.ActionRequest {

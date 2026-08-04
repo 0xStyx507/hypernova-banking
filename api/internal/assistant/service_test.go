@@ -18,6 +18,27 @@ func TestLocalProviderPreparesDepositIntent(t *testing.T) {
 	}
 }
 
+func TestLocalProviderConvertsNaturalDollarAmountToMinorUnits(t *testing.T) {
+	response, err := (LocalProvider{}).Complete(context.Background(), "depositar USD 25.50")
+	if err != nil || response.FinancialAction == nil || response.FinancialAction.Amount != "2550" {
+		t.Fatalf("expected USD 25.50 to become 2550 minor units, response=%+v, err=%v", response, err)
+	}
+}
+
+func TestLocalProviderConvertsSpanishNumberInOperationPhrase(t *testing.T) {
+	response, err := (LocalProvider{}).Complete(context.Background(), "depositar dos mil dólares")
+	if err != nil || response.FinancialAction == nil || response.FinancialAction.Amount != "200000" {
+		t.Fatalf("expected dos mil dólares to become 200000 minor units, response=%+v, err=%v", response, err)
+	}
+}
+
+func TestLocalProviderUnderstandsCashflowQuery(t *testing.T) {
+	response, err := (LocalProvider{}).Complete(context.Background(), "cuánto gasté este mes")
+	if err != nil || response.ReadOnlyTool != "get_cashflow_summary" {
+		t.Fatalf("expected cashflow summary tool, response=%+v, err=%v", response, err)
+	}
+}
+
 func TestLocalProviderRequiresExternalDestination(t *testing.T) {
 	response, err := (LocalProvider{}).Complete(context.Background(), "transferir 2500 a otra cuenta")
 	if err != nil {
@@ -48,9 +69,9 @@ func TestConversationKeepsDepositIntentForNumericReply(t *testing.T) {
 	}
 }
 
-func TestConversationRejectsFreeTextAsAmount(t *testing.T) {
-	if got := amountOnly("dos mil"); got != "" {
-		t.Fatalf("amountOnly accepted free text: %q", got)
+func TestConversationAcceptsSpanishNumberAsAmount(t *testing.T) {
+	if got := amountOnly("dos mil"); got != "200000" {
+		t.Fatalf("amountOnly = %q, want 200000", got)
 	}
 }
 

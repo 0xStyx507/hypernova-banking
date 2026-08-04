@@ -1,6 +1,13 @@
 import { Account, Balance, History, MCPAction, OperationMode, User } from "../../api";
 import { DashboardSection } from "../../types";
 
+export type MobileFeedbackTone = "error" | "success" | "warning" | "info";
+
+export interface MobileFeedback {
+  tone: MobileFeedbackTone;
+  message: string;
+}
+
 export interface MobileDashboardProps {
   user: User;
   accessToken: string;
@@ -19,6 +26,7 @@ export interface MobileDashboardProps {
   transferTargetType: "own" | "external";
   transferConfirmationPin: string;
   operationBusy: boolean;
+  operationNotice: MobileFeedback | null;
   notice: string;
   accountBusy: boolean;
   accountNotice: string;
@@ -28,6 +36,7 @@ export interface MobileDashboardProps {
   profileNotice: string;
   mcpPin: string;
   mcpPinConfigured: boolean;
+  mcpPinExpiresAt?: string;
   mcpPinBusy: boolean;
   mcpPinNotice: string;
   mcpActionPending: boolean;
@@ -51,5 +60,6 @@ export interface MobileDashboardProps {
   onMCPPINChange: (pin: string) => void;
   onSetMCPPIN: () => void;
   onLogout: () => void;
+  onThemeToggle: () => void;
   onMCPActionPendingChange: (pending: boolean) => void;
 }

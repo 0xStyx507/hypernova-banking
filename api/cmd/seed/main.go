@@ -56,5 +56,5 @@ func main() {
 		slog.Error("seed failed", "error", err)
 		os.Exit(1)
 	}
-	fmt.Printf("seed complete: users=%d accounts_deferred=%d transactions_deferred=%d\n", report.UsersProcessed, report.AccountsDeferred, report.TransactionsDeferred)
+	fmt.Printf("seed complete: users=%d accounts_imported=%d transactions_imported=%d\n", report.UsersProcessed, report.AccountsImported, report.TransactionsImported)
 }

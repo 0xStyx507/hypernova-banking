@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -51,14 +52,26 @@ func registerMCPRoutes(router chi.Router, authService *auth.Service, service *mc
 
 func (h mcpHandler) tools(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"protocol": "hypernova-mcp-http/1",
+		"protocol": mcp.ProtocolVersion,
 		"tools": []map[string]any{
-			{"name": "get_accounts", "read_only": true, "description": "List accounts owned by the authenticated user."},
-			{"name": "get_balance", "read_only": true, "description": "Read a TigerBeetle-backed USD balance."},
-			{"name": "get_transactions", "read_only": true, "description": "Read account history with cursor pagination."},
+			{"name": "get_accounts", "read_only": true, "description": "List accounts owned by the authenticated user.", "input_schema": map[string]any{"type": "object"}},
+			{"name": "get_balance", "read_only": true, "description": "Read a TigerBeetle-backed USD balance.", "input_schema": accountInputSchema()},
+			{"name": "get_transactions", "read_only": true, "description": "Read recent account history with cursor pagination.", "input_schema": accountInputSchema()},
+			{"name": "search_transactions", "read_only": true, "description": "Filter recent account history by date, type, direction, or amount.", "input_schema": transactionSearchSchema()},
+			{"name": "get_cashflow_summary", "read_only": true, "description": "Summarize credits, debits, and net cashflow for an account.", "input_schema": transactionSearchSchema()},
 			{"name": "prepare_financial_action", "read_only": false, "description": "Prepare a deposit, withdrawal, or transfer for explicit confirmation."},
 		},
 	})
+}
+
+func accountInputSchema() map[string]any {
+	return map[string]any{"type": "object", "required": []string{"account_id"}, "properties": map[string]any{"account_id": map[string]string{"type": "string", "format": "uuid"}}}
+}
+
+func transactionSearchSchema() map[string]any {
+	return map[string]any{"type": "object", "required": []string{"account_id"}, "properties": map[string]any{
+		"account_id": map[string]string{"type": "string", "format": "uuid"}, "type": map[string]any{"type": "string", "enum": []string{"deposit", "withdrawal", "transfer"}}, "direction": map[string]any{"type": "string", "enum": []string{"credit", "debit"}}, "from": map[string]string{"type": "string", "format": "date-time"}, "to": map[string]string{"type": "string", "format": "date-time"}, "min_amount": map[string]string{"type": "string", "pattern": "^[0-9]+$"}, "max_amount": map[string]string{"type": "string", "pattern": "^[0-9]+$"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+	}}
 }
 
 // callTool dispatches read-only tools and intent preparation. Confirmation
@@ -117,6 +130,33 @@ func (h mcpHandler) callTool(w http.ResponseWriter, r *http.Request) {
 			nextCursor = strconv.FormatInt(items[len(items)-1].CreatedAt.UnixNano(), 10)
 		}
 		result, err = map[string]any{"items": items, "has_more": hasMore, "next_cursor": nextCursor}, nil
+	case "search_transactions", "get_cashflow_summary":
+		var arguments struct {
+			AccountID string `json:"account_id"`
+			Type      string `json:"type"`
+			Direction string `json:"direction"`
+			From      string `json:"from"`
+			To        string `json:"to"`
+			MinAmount string `json:"min_amount"`
+			MaxAmount string `json:"max_amount"`
+			Limit     uint32 `json:"limit"`
+		}
+		if json.Unmarshal(request.Arguments, &arguments) != nil || strings.TrimSpace(arguments.AccountID) == "" {
+			writeErrorCode(w, http.StatusBadRequest, "invalid_mcp_arguments", "account_id is required")
+			return
+		}
+		query, queryErr := transactionQuery(arguments.Type, arguments.Direction, arguments.From, arguments.To, arguments.MinAmount, arguments.MaxAmount, arguments.Limit)
+		if queryErr != nil {
+			writeErrorCode(w, http.StatusBadRequest, "invalid_mcp_arguments", queryErr.Error())
+			return
+		}
+		if request.Name == "search_transactions" {
+			items, searchErr := h.ledger.SearchHistory(r.Context(), userID, arguments.AccountID, query)
+			result, err = map[string]any{"items": items}, searchErr
+		} else {
+			summary, summaryErr := h.ledger.SummarizeHistory(r.Context(), userID, arguments.AccountID, query)
+			result, err = summary, summaryErr
+		}
 	case "prepare_financial_action":
 		var arguments mcp.ActionRequest
 		if json.Unmarshal(request.Arguments, &arguments) != nil {
@@ -137,6 +177,53 @@ func (h mcpHandler) callTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"name": request.Name, "result": result})
+}
+
+func transactionQuery(kind, direction, from, to, minAmount, maxAmount string, limit uint32) (ledger.TransactionQuery, error) {
+	query := ledger.TransactionQuery{Type: strings.TrimSpace(kind), Direction: strings.TrimSpace(direction), Limit: limit}
+	if query.Type != "" && query.Type != "deposit" && query.Type != "withdrawal" && query.Type != "transfer" {
+		return ledger.TransactionQuery{}, errors.New("type is invalid")
+	}
+	if query.Direction != "" && query.Direction != "credit" && query.Direction != "debit" {
+		return ledger.TransactionQuery{}, errors.New("direction is invalid")
+	}
+	parseTime := func(value string) (*time.Time, error) {
+		if strings.TrimSpace(value) == "" {
+			return nil, nil
+		}
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			return nil, errors.New("dates must use RFC3339")
+		}
+		return &parsed, nil
+	}
+	var err error
+	if query.From, err = parseTime(from); err != nil {
+		return ledger.TransactionQuery{}, err
+	}
+	if query.To, err = parseTime(to); err != nil {
+		return ledger.TransactionQuery{}, err
+	}
+	parseAmount := func(value string) (int64, error) {
+		if strings.TrimSpace(value) == "" {
+			return 0, nil
+		}
+		parsed, parseErr := strconv.ParseInt(value, 10, 64)
+		if parseErr != nil || parsed < 0 {
+			return 0, errors.New("amount filters must be positive minor units")
+		}
+		return parsed, nil
+	}
+	if query.MinAmount, err = parseAmount(minAmount); err != nil {
+		return ledger.TransactionQuery{}, err
+	}
+	if query.MaxAmount, err = parseAmount(maxAmount); err != nil {
+		return ledger.TransactionQuery{}, err
+	}
+	if query.MinAmount > 0 && query.MaxAmount > 0 && query.MinAmount > query.MaxAmount {
+		return ledger.TransactionQuery{}, errors.New("min_amount cannot exceed max_amount")
+	}
+	return query, nil
 }
 
 func (h mcpHandler) prepare(w http.ResponseWriter, r *http.Request) {

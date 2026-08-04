@@ -1,6 +1,7 @@
 import { KeyboardAvoidingView, Platform, Pressable, SafeAreaView, ScrollView, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { OAuthProvider } from "../api";
 import { HyperBankLogo } from "./HyperBankLogo";
+import { PasswordSecurityMeter } from "./PasswordSecurityMeter";
 
 type AuthMode = "login" | "register";
 
@@ -11,6 +12,8 @@ interface AuthViewProps {
   setEmail: (value: string) => void;
   password: string;
   setPassword: (value: string) => void;
+  passwordConfirmation: string;
+  setPasswordConfirmation: (value: string) => void;
   fullName: string;
   setFullName: (value: string) => void;
   busy: boolean;
@@ -42,7 +45,10 @@ export function AuthView(props: AuthViewProps) {
 
             {props.mode === "register" ? <TextInput className="mt-6 rounded-2xl bg-slate-100 px-4 py-4 dark:bg-[#1d3047] dark:text-slate-100" value={props.fullName} onChangeText={props.setFullName} placeholder="Nombre completo" autoComplete="name" /> : null}
             <TextInput className="mt-4 rounded-2xl bg-slate-100 px-4 py-4 dark:bg-[#1d3047] dark:text-slate-100" value={props.email} onChangeText={props.setEmail} placeholder="Email" autoCapitalize="none" keyboardType="email-address" autoComplete="email" />
-            <TextInput className="mt-4 rounded-2xl bg-slate-100 px-4 py-4 dark:bg-[#1d3047] dark:text-slate-100" value={props.password} onChangeText={props.setPassword} placeholder="Contraseña" secureTextEntry autoCapitalize="none" autoComplete="password" />
+            <TextInput className="mt-4 rounded-2xl bg-slate-100 px-4 py-4 dark:bg-[#1d3047] dark:text-slate-100" value={props.password} onChangeText={props.setPassword} placeholder="Contraseña" secureTextEntry autoCapitalize="none" autoComplete={props.mode === "login" ? "password" : "new-password"} maxLength={72} />
+            {props.mode === "register" ? <PasswordSecurityMeter value={props.password} /> : null}
+            {props.mode === "register" ? <TextInput className={`mt-4 rounded-2xl px-4 py-4 dark:bg-[#1d3047] dark:text-slate-100 ${props.passwordConfirmation && props.passwordConfirmation !== props.password ? "border border-red-300 bg-red-50" : "bg-slate-100"}`} value={props.passwordConfirmation} onChangeText={props.setPasswordConfirmation} placeholder="Confirmar contraseña" secureTextEntry autoCapitalize="none" autoComplete="new-password" maxLength={72} /> : null}
+            {props.mode === "register" && props.passwordConfirmation && props.passwordConfirmation !== props.password ? <Text className="mt-2 text-xs text-red-700">Las contraseñas no coinciden.</Text> : null}
 
             <Pressable className="mt-6 rounded-full bg-[#16c1b5] px-5 py-4" disabled={props.busy} onPress={props.onSubmit}>
               <Text className="text-center font-semibold text-[#2d73a5]">{props.busy ? "Procesando…" : props.mode === "login" ? "Iniciar sesión" : "Crear cuenta USD"}</Text>

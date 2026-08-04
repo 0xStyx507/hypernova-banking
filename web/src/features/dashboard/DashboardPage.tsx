@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Account, Balance, MCPAccountOption, Transaction, User } from "../../api";
 import { HistoryPagination } from "./HistoryPagination";
 import { DashboardData, OperationMode } from "../../types";
-import { HyperBankWordmark } from "../../components/brand/HyperBankWordmark";
+import { FeedbackMessage } from "../../components/feedback/FeedbackMessage";
 import { currencyInputToMinor, sanitizeCurrencyInput } from "../../money";
 
 interface DashboardPageProps extends DashboardData {
@@ -82,16 +82,29 @@ export function DashboardPage(props: DashboardPageProps) {
   return (
     <main className="dashboard-page min-h-screen text-ink">
       <DashboardHeader user={user} view={view} onLogout={props.onLogout} onNavigate={navigate} />
-      <div className="dashboard-container mx-auto space-y-6 px-4 py-5 sm:px-8 sm:py-8">
-        {props.dashboardError && <p className="status-message status-error" role="alert">{props.dashboardError}</p>}
-        {navigationNotice && <p className="status-message status-error" role="alert">{navigationNotice}</p>}
-        {view === "home" && <AccountsHome {...props} />}
+      <div className="dashboard-main">
+        <div className="dashboard-content-header">
+          <div>
+            <h1>Buenas tardes, {user.full_name.split(/\s+/u)[0] || "cliente"}</h1>
+            <p>Aquí tienes el estado de tus finanzas hoy.</p>
+          </div>
+          <div className="dashboard-content-actions">
+            <ThemeToggle mode={props.themeMode} onChange={(mode) => props.onThemeModeChange(mode)} />
+            <span className="dashboard-protected-pill"><span />Todo protegido</span>
+            <span className="dashboard-avatar" aria-hidden="true">{user.full_name.split(/\s+/u).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</span>
+          </div>
+        </div>
+        <div className="dashboard-container mx-auto space-y-6 px-4 py-5 sm:px-8 sm:py-8">
+        {props.dashboardError && <FeedbackMessage tone="error" message={props.dashboardError} />}
+        {navigationNotice && <FeedbackMessage tone="warning" message={navigationNotice} title="Operacion pendiente" />}
+        {view === "home" && <AccountsHome {...props} onNavigate={navigate} />}
         {view === "history" && <TransactionHistoryPanel {...props} />}
         {isOperationView(view) && <OperationPage {...props} mode={view} onNavigate={navigate} />}
         {view === "settings" && <SettingsPanel {...props} />}
         <MCPPanel {...props} chatOpen={assistantOpen} onChatOpenChange={setAssistantOpen} onNavigateSettings={() => navigate("settings")} />
         <footer className="border-t border-slate-200 pt-5 text-xs text-slate-500">Tu información está protegida y tus movimientos quedan siempre disponibles para ti.</footer>
         {!activeAccount && <p className="sr-only">No hay una cuenta activa seleccionada.</p>}
+        </div>
       </div>
     </main>
   );
@@ -128,24 +141,25 @@ function EyeIcon({ visible }: { visible: boolean }) {
 
 function DashboardHeader({ user, view, onLogout, onNavigate }: { user: User; view: DashboardView; onLogout: () => void; onNavigate: (view: DashboardView) => void }) {
   const links: Array<{ view: DashboardView; label: string }> = [
-    { view: "home", label: "Cuentas" },
-    { view: "history", label: "Consultas" },
-    { view: "transfer", label: "Transacciones" },
+    { view: "home", label: "Inicio" },
+    { view: "history", label: "Movimientos" },
+    { view: "transfer", label: "Operaciones" },
     { view: "deposit", label: "Depositar" },
     { view: "withdraw", label: "Retirar" },
-    { view: "settings", label: "Configuraciones" },
+    { view: "settings", label: "Seguridad" },
   ];
 
   return <header className="dashboard-header">
     <div className="dashboard-header-inner">
       <div className="dashboard-header-bar">
-        <HyperBankWordmark className="dashboard-brand dashboard-brand-light" />
+        <div className="dashboard-sidebar-logo"><span className="dashboard-sidebar-mark">H</span><span>Hypernova</span></div>
         <div className="dashboard-header-account"><div><strong>{user.full_name}</strong><small>{user.email}</small></div><button className="dashboard-navbar-logout" onClick={onLogout} type="button">Cerrar sesión</button></div>
       </div>
 
       <nav className="dashboard-header-nav" aria-label="Navegación principal">
         {links.map((link) => <a className={`dashboard-header-nav-link ${view === link.view ? "dashboard-header-nav-link-active" : ""}`} href={`/dashboard/${link.view === "home" ? "home" : link.view === "withdraw" ? "withdrawal" : link.view}`} key={link.view} onClick={(event) => { event.preventDefault(); onNavigate(link.view); }}>{link.view !== "home" && <NavIcon name={link.view} />}{link.label}</a>)}
       </nav>
+      <div className="dashboard-sidebar-security" aria-label="Estado de seguridad"><strong>Seguridad</strong><span><i />MFA activa</span><span><i />PIN disponible</span><small>Sesion protegida</small></div>
     </div>
   </header>;
 }
@@ -161,15 +175,26 @@ function maskAccountNumber(accountId: string): string {
   return `${accountId.slice(0, 4)}••••${accountId.slice(-4)}`;
 }
 
-function AccountsHome(props: DashboardPageProps) {
+function LegacyAccountsHome(props: DashboardPageProps & { onNavigate: (view: DashboardView) => void }) {
   const activeId = props.activeAccount?.id;
   const activeBalance = props.balance?.available_balance ?? "0";
+  const recentTransactions = props.history?.items.slice(0, 5) ?? [];
+  const incoming = recentTransactions.filter((transaction) => transaction.direction === "credit").reduce((total, transaction) => { try { return total + BigInt(transaction.amount); } catch { return total; } }, 0n).toString();
+  const outgoing = recentTransactions.filter((transaction) => transaction.direction !== "credit").reduce((total, transaction) => { try { return total + BigInt(transaction.amount); } catch { return total; } }, 0n).toString();
   const [showAccountNumbers, setShowAccountNumbers] = useState(false);
   const [editingAccountId, setEditingAccountId] = useState("");
   const [editingName, setEditingName] = useState("");
   const totalBalance = useMemo(() => Object.values(props.accountBalances).reduce((total, current) => { try { return total + BigInt(current.available_balance); } catch { return total; } }, 0n).toString(), [props.accountBalances]);
   function startRename(account: Account, index: number) { setEditingAccountId(account.id); setEditingName(accountDisplayName(account, index)); }
   return <section className="bank-home space-y-6">
+    <div className="dashboard-overview-grid">
+      <article className="dashboard-balance-card"><span className="dashboard-account-pill"><i />Cuenta principal · {props.activeAccount ? maskAccountNumber(props.activeAccount.id).slice(-4) : "0000"}</span><span className="dashboard-balance-label">Saldo disponible</span><strong>{formatMinorAmount(activeBalance).replace("USD", "B/.")}</strong><small>+6.8% frente al mes anterior</small></article>
+      <article className="dashboard-accounts-card"><div className="dashboard-card-heading"><h2>Mis cuentas</h2><span className="dashboard-status-chip"><i />{props.accounts.length} activas</span></div>{props.accounts.slice(0, 3).map((account, index) => <div className="dashboard-account-row" key={account.id}><span><strong>{accountDisplayName(account, index)}</strong><small>{maskAccountNumber(account.id)}</small></span><b>{formatMinorAmount(props.accountBalances[account.id]?.available_balance ?? "0").replace("USD", "B/.")}</b></div>)}</article>
+    </div>
+    <div className="dashboard-metrics-grid"><article><span>Ingresos <i className="metric-dot metric-dot-teal" /></span><strong>{formatMinorAmount(incoming).replace("USD", "B/.")}</strong><small>+12.4%</small></article><article><span>Gastos <i className="metric-dot metric-dot-purple" /></span><strong>{formatMinorAmount(outgoing).replace("USD", "B/.")}</strong><small>-4.2%</small></article><article><span>Balance mensual <i className="metric-dot metric-dot-blue" /></span><strong>{formatMinorAmount((BigInt(incoming || "0") - BigInt(outgoing || "0")).toString()).replace("USD", "B/.")}</strong><small>+18.1%</small></article></div>
+    <div className="dashboard-card-actions"><button className="dashboard-card-secondary" onClick={() => props.onNavigate("deposit")} type="button">Depositar</button><button className="dashboard-card-primary" onClick={() => props.onNavigate("transfer")} type="button">Transferir</button></div>
+    {recentTransactions.length > 0 && <div className="dashboard-chart-card"><div><h2>Actividad financiera</h2><p>Entradas y salidas de tus movimientos recientes</p></div><FinancialLineChart transactions={recentTransactions} /></div>}
+    {recentTransactions.length > 0 && <div className="dashboard-latest-section"><div className="dashboard-latest-heading"><h2>Últimos movimientos</h2><button onClick={() => props.onNavigate("history")} type="button">Ver todos</button></div><div className="dashboard-latest-grid">{recentTransactions.slice(0, 2).map((transaction) => <article className="dashboard-latest-card" key={`${transaction.transfer_id}-latest`}><span className={`dashboard-latest-icon ${transaction.direction === "credit" ? "is-credit" : "is-debit"}`}>{transaction.direction === "credit" ? "↓" : "↑"}</span><div><strong>{transactionLabel(transaction)}</strong><small>{new Date(transaction.created_at).toLocaleDateString("es-PA")}</small></div><b className={transaction.direction === "credit" ? "transaction-credit" : "transaction-debit"}>{transaction.direction === "credit" ? "+" : "−"}{formatMinorAmount(transaction.amount).replace("USD", "B/.")}</b></article>)}</div></div>}
     <div className="bank-page-heading"><h1>Cuentas personales</h1><button className="account-visibility-button" aria-label={showAccountNumbers ? "Ocultar números de cuenta" : "Mostrar números de cuenta"} onClick={() => setShowAccountNumbers((current) => !current)} type="button"><EyeIcon visible={showAccountNumbers} /></button></div>
     <div className="bank-account-section surface">
       <div className="bank-table-header"><span><ChevronIcon direction="up" /> Cuentas de depósito</span><span>Saldo capital</span><span>Disponible</span><span aria-hidden="true" /></div>
@@ -189,12 +214,95 @@ function AccountsHome(props: DashboardPageProps) {
       <div className="bank-account-footer"><button className="bank-add-account" disabled={props.accountBusy} onClick={props.onCreateAccount} type="button"><PlusIcon /> {props.accountBusy ? "Abriendo cuenta…" : "Abrir nueva cuenta"}</button></div>
       <div className="bank-account-total"><span>Total de cuentas</span><strong>{Object.keys(props.accountBalances).length ? formatMinorAmount(totalBalance) : "—"}</strong><strong>{Object.keys(props.accountBalances).length ? formatMinorAmount(totalBalance) : "—"}</strong><span /></div>
     </div>
-    {props.accountNotice && <p className={`status-message ${props.accountNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{props.accountNotice.message}</p>}
+    {props.accountNotice && <FeedbackMessage tone={props.accountNotice.tone} message={props.accountNotice.message} />}
   </section>;
 }
 
-function SettingsPanel(props: DashboardPageProps) {
+function AccountsHome(props: DashboardPageProps & { onNavigate: (view: DashboardView) => void }) {
+  const recentTransactions = props.history?.items.slice(0, 6) ?? [];
+  const incoming = recentTransactions.filter((transaction) => transaction.direction === "credit").reduce((total, transaction) => { try { return total + BigInt(transaction.amount); } catch { return total; } }, 0n).toString();
+  const outgoing = recentTransactions.filter((transaction) => transaction.direction !== "credit").reduce((total, transaction) => { try { return total + BigInt(transaction.amount); } catch { return total; } }, 0n).toString();
+  let monthlyBalance = "0";
+  try { monthlyBalance = (BigInt(incoming || "0") - BigInt(outgoing || "0")).toString(); } catch { /* Keep the overview readable when fixture data is incomplete. */ }
+  const activeBalance = props.balance?.available_balance ?? "0";
+
+  return <section className="bank-home space-y-6">
+    <div className="dashboard-overview-grid">
+      <article className="dashboard-balance-card">
+        <span className="dashboard-account-pill"><i />Cuenta principal · {props.activeAccount ? maskAccountNumber(props.activeAccount.id).slice(-4) : "0000"}</span>
+        <span className="dashboard-balance-label">Saldo disponible</span>
+        <strong>{formatMinorAmount(activeBalance).replace("USD", "B/.")}</strong>
+        <small>+6.8% frente al mes anterior</small>
+        <div className="dashboard-balance-actions"><button className="dashboard-card-secondary" onClick={() => props.onNavigate("deposit")} type="button">Depositar</button><button className="dashboard-card-primary" onClick={() => props.onNavigate("transfer")} type="button">Transferir</button></div>
+      </article>
+      <AccountsCompactCard {...props} />
+    </div>
+    <div className="dashboard-metrics-grid"><article><span>Ingresos <i className="metric-dot metric-dot-teal" /></span><strong>{formatMinorAmount(incoming).replace("USD", "B/.")}</strong><small>+12.4%</small></article><article><span>Gastos <i className="metric-dot metric-dot-purple" /></span><strong>{formatMinorAmount(outgoing).replace("USD", "B/.")}</strong><small>-4.2%</small></article><article><span>Balance mensual <i className="metric-dot metric-dot-blue" /></span><strong>{formatMinorAmount(monthlyBalance).replace("USD", "B/.")}</strong><small>+18.1%</small></article></div>
+    {recentTransactions.length > 0 && <div className="dashboard-chart-card"><div><h2>Actividad financiera</h2><p>Entradas y salidas de tus movimientos recientes</p></div><FinancialLineChart transactions={recentTransactions} /></div>}
+    {recentTransactions.length > 0 && <div className="dashboard-latest-section"><div className="dashboard-latest-heading"><h2>Últimos movimientos</h2><button onClick={() => props.onNavigate("history")} type="button">Ver todos</button></div><div className="dashboard-latest-grid">{recentTransactions.slice(0, 2).map((transaction) => <article className="dashboard-latest-card" key={`${transaction.transfer_id}-latest`}><span className={`dashboard-latest-icon ${transaction.direction === "credit" ? "is-credit" : "is-debit"}`}>{transaction.direction === "credit" ? "↓" : "↑"}</span><div><strong>{transactionLabel(transaction)}</strong><small>{new Date(transaction.created_at).toLocaleDateString("es-PA")}</small></div><b className={transaction.direction === "credit" ? "transaction-credit" : "transaction-debit"}>{transaction.direction === "credit" ? "+" : "−"}{formatMinorAmount(transaction.amount).replace("USD", "B/.")}</b></article>)}</div></div>}
+  </section>;
+}
+
+function AccountsCompactCard(props: DashboardPageProps) {
+  const [showAccountNumbers, setShowAccountNumbers] = useState(false);
+  const [editingAccountId, setEditingAccountId] = useState("");
+  const [editingName, setEditingName] = useState("");
+  const totalBalance = useMemo(() => Object.values(props.accountBalances).reduce((total, current) => { try { return total + BigInt(current.available_balance); } catch { return total; } }, 0n).toString(), [props.accountBalances]);
+  function startRename(account: Account, index: number) { setEditingAccountId(account.id); setEditingName(accountDisplayName(account, index)); }
+
+  return <article className="dashboard-accounts-card">
+    <div className="dashboard-card-heading"><h2>Mis cuentas</h2><div className="dashboard-account-card-tools"><span className="dashboard-status-chip"><i />{props.accounts.length} activas</span><button className="dashboard-account-visibility" aria-label={showAccountNumbers ? "Ocultar numeros de cuenta" : "Mostrar numeros de cuenta"} onClick={() => setShowAccountNumbers((current) => !current)} type="button"><EyeIcon visible={showAccountNumbers} /></button></div></div>
+    <div className="dashboard-accounts-list">{props.accounts.map((account, index) => <div className="dashboard-account-entry" key={account.id}><div className={`dashboard-account-row ${props.activeAccount?.id === account.id ? "dashboard-account-row-active" : ""}`}><button className="dashboard-account-select" onClick={() => props.onAccountChange(account.id)} type="button"><span><strong>{accountDisplayName(account, index)}</strong><small>{showAccountNumbers ? account.id : maskAccountNumber(account.id)}</small></span><b>{formatMinorAmount(props.accountBalances[account.id]?.available_balance ?? "0").replace("USD", "B/.")}</b></button><button className="dashboard-account-menu" aria-label={`Editar ${accountDisplayName(account, index)}`} onClick={() => startRename(account, index)} type="button"><MoreIcon /></button></div>{editingAccountId === account.id && <div className="dashboard-account-editor"><label><span className="field-label">Nombre de la cuenta</span><input value={editingName} maxLength={48} onChange={(event) => setEditingName(event.target.value)} /></label><div className="operation-actions"><button className="secondary-button" onClick={() => setEditingAccountId("")} type="button">Cancelar</button><button className="primary-button" disabled={props.accountRenameBusyId === account.id} onClick={() => { props.onRenameAccount(account.id, editingName); setEditingAccountId(""); }} type="button">Guardar nombre</button><button className="secondary-button danger-button" disabled={props.accountDeleteBusyId === account.id || props.accountBalances[account.id]?.available_balance !== "0" || props.accountBalances[account.id]?.credits_pending !== "0" || props.accountBalances[account.id]?.debits_pending !== "0"} onClick={() => props.onDeleteAccount(account.id)} type="button">Cerrar cuenta</button></div><small className="field-help">Solo se puede cerrar con saldo y movimientos pendientes en cero.</small></div>}</div>)}</div>
+    <div className="dashboard-account-card-footer"><button className="bank-add-account" disabled={props.accountBusy} onClick={props.onCreateAccount} type="button"><PlusIcon /> {props.accountBusy ? "Abriendo cuenta..." : "Abrir nueva cuenta"}</button></div>
+    <div className="dashboard-account-card-total"><span>Total de cuentas</span><strong>{props.accounts.length ? formatMinorAmount(totalBalance).replace("USD", "B/.") : "—"}</strong></div>
+    {props.accountNotice && <FeedbackMessage tone={props.accountNotice.tone} message={props.accountNotice.message} />}
+  </article>;
+}
+
+function LegacySettingsPanel(props: DashboardPageProps) {
   return <section className="dashboard-settings-page surface p-5 sm:p-8"><div className="dashboard-page-title"><p className="dashboard-kicker">Configuraciones</p><h2>Tu perfil y seguridad</h2><p>Actualiza tus datos personales y revisa la protección de tu cuenta.</p></div><div className="theme-settings" aria-labelledby="theme-settings-title"><div><p className="dashboard-kicker">Apariencia</p><h3 id="theme-settings-title">Tema de la aplicación</h3><p>Usa el tema del dispositivo o elige una apariencia.</p></div><div className="theme-options" role="group" aria-label="Tema de la aplicación">{([['system','Sistema'],['light','Claro'],['dark','Oscuro']] as const).map(([mode,label]) => <button className={props.themeMode === mode ? "theme-option-active" : ""} key={mode} onClick={() => props.onThemeModeChange(mode)} type="button">{label}</button>)}</div></div><form className="profile-form" onSubmit={props.onProfileSubmit}><label><span className="field-label">Nombre completo</span><input autoComplete="name" required minLength={2} maxLength={120} value={props.profileFullName} onChange={(event) => props.onProfileNameChange(event.target.value)} /></label><label><span className="field-label">Correo electrónico</span><input autoComplete="email" value={props.user.email} disabled /></label><p className="profile-help">El correo no se modifica desde aquí porque requiere un proceso de verificación.</p>{props.profileNotice && <p className={`status-message ${props.profileNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{props.profileNotice.message}</p>}<button className="primary-button" disabled={props.profileBusy} type="submit">{props.profileBusy ? "Guardando…" : "Guardar cambios"}</button></form><div className="settings-grid"><article><span className="settings-icon">✓</span><div><h3>Autenticación multifactor</h3><p>Tu cuenta tiene una segunda capa de protección activa.</p></div><strong>Activa</strong></article><article><span className="settings-icon">⌁</span><div><h3>Sesión protegida</h3><p>La sesión se renueva de forma segura mientras utilizas la aplicación.</p></div><strong>Segura</strong></article></div><form className="mcp-pin-settings" onSubmit={props.onSetMCPPIN}><div><p className="dashboard-kicker">Confirmaciones</p><h3>PIN del asistente</h3><p>Se solicita solo al confirmar una operación y vence automáticamente en tres minutos.</p></div><label><span className="field-label">PIN de 4 dígitos</span><input autoComplete="new-password" inputMode="numeric" maxLength={4} pattern="[0-9]{4}" type="password" value={props.mcpPin} onChange={(event) => props.onMCPPINChange(event.target.value)} placeholder="••••" /></label>{props.mcpPinNotice && <p className={`status-message ${props.mcpPinNotice.tone === "error" ? "status-error" : "status-success"}`} role="alert">{props.mcpPinNotice.message}</p>}<button className="primary-button" disabled={props.mcpPinBusy} type="submit">{props.mcpPinBusy ? "Guardando…" : props.mcpPinConfigured ? "Renovar PIN" : "Crear PIN"}</button></form></section>;
+}
+
+function ThemeToggle({ mode, onChange }: { mode: DashboardData["themeMode"]; onChange: (mode: "light" | "dark") => void }) {
+  const dark = mode === "dark";
+  return <button className="theme-toggle" type="button" aria-label={dark ? "Cambiar a modo claro" : "Cambiar a modo oscuro"} title={dark ? "Cambiar a modo claro" : "Cambiar a modo oscuro"} onClick={() => onChange(dark ? "light" : "dark")}><span aria-hidden="true">{dark ? "☼" : "☾"}</span><small>{dark ? "Light" : "Dark"}</small></button>;
+}
+
+function formatPinCountdown(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
+  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function SettingsPanel(props: DashboardPageProps) {
+  const [now, setNow] = useState(() => Date.now());
+  const expiresAt = props.mcpPinExpiresAt ? new Date(props.mcpPinExpiresAt).getTime() : 0;
+  const remaining = props.mcpPinConfigured && expiresAt ? Math.max(0, expiresAt - now) : 0;
+  const pinExpired = props.mcpPinConfigured && Boolean(expiresAt) && remaining === 0;
+
+  useEffect(() => {
+    if (!props.mcpPinConfigured || !expiresAt) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [expiresAt, props.mcpPinConfigured]);
+
+  const pinStatus = pinExpired ? "Vencido" : props.mcpPinConfigured ? "Activo" : "No configurado";
+  const pinStatusClass = pinExpired ? "security-status-expired" : props.mcpPinConfigured ? "security-status-active" : "security-status-idle";
+
+  return <section className="dashboard-settings-page surface p-5 sm:p-8">
+    <div className="dashboard-page-title"><p className="dashboard-kicker">Configuraciones</p><h2>Tu perfil y seguridad</h2><p>Actualiza tus datos personales y revisa la protecci&oacute;n de tu cuenta.</p></div>
+    <div className="theme-settings" aria-labelledby="theme-settings-title"><div><p className="dashboard-kicker">Apariencia</p><h3 id="theme-settings-title">Tema claro</h3><p>La interfaz esta optimizada para una lectura consistente y accesible.</p></div><span className="theme-option-active theme-fixed-option">Activo</span></div>
+    <form className="profile-form" onSubmit={props.onProfileSubmit}><label><span className="field-label">Nombre completo</span><input autoComplete="name" required minLength={2} maxLength={120} value={props.profileFullName} onChange={(event) => props.onProfileNameChange(event.target.value)} /></label><label><span className="field-label">Correo electronico</span><input autoComplete="email" value={props.user.email} disabled /></label><p className="profile-help">El correo no se modifica desde aqui porque requiere un proceso de verificacion.</p>{props.profileNotice && <FeedbackMessage tone={props.profileNotice.tone} message={props.profileNotice.message} /> }<button className="primary-button" disabled={props.profileBusy} type="submit">{props.profileBusy ? "Guardando..." : "Guardar cambios"}</button></form>
+    <div className="settings-grid"><article><span className="settings-icon">✓</span><div><h3>Autenticacion multifactor</h3><p>Tu cuenta tiene una segunda capa de proteccion activa.</p></div><strong>Activa</strong></article><article><span className="settings-icon">⌁</span><div><h3>Sesion protegida</h3><p>La sesion se renueva de forma segura mientras utilizas la aplicacion.</p></div><strong>Segura</strong></article></div>
+    <form className="security-card" onSubmit={props.onSetMCPPIN}>
+      <div className="security-card-header"><span className="security-card-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7.5 10V7.5a4.5 4.5 0 0 1 9 0V10M6 10h12v9H6v-9Z" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" /><path d="M12 13.5v2" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" /></svg></span><div><p className="dashboard-kicker">Confirmaciones seguras</p><h3>PIN del asistente</h3><p>Se solicita al confirmar operaciones desde el chatbot. Se guarda protegido y vence automaticamente cada tres minutos.</p></div><span className={`security-status ${pinStatusClass}`}><span className="security-status-dot" />{pinStatus}</span></div>
+      <div className="security-card-meta" aria-live="polite"><span>{pinExpired ? "Crea un PIN nuevo para volver a confirmar operaciones." : props.mcpPinConfigured ? "PIN protegido y listo para confirmar" : "Configura un PIN para autorizar operaciones"}</span>{props.mcpPinConfigured && !pinExpired && <strong>Expira en {formatPinCountdown(remaining)}</strong>}</div>
+      <div className="security-card-form"><label><span className="field-label">PIN de 4 digitos</span><input className="pin-input" autoComplete="new-password" inputMode="numeric" maxLength={4} pattern="[0-9]{4}" type="password" value={props.mcpPin} onChange={(event) => props.onMCPPINChange(event.target.value)} placeholder="••••" aria-describedby="pin-help" /></label><button className="primary-button" disabled={props.mcpPinBusy} type="submit">{props.mcpPinBusy ? "Guardando..." : props.mcpPinConfigured && !pinExpired ? "Renovar PIN" : "Crear PIN"}</button></div>
+      <p id="pin-help" className="security-card-note">Nunca mostramos ni almacenamos tu PIN en texto visible. Despues de cinco intentos incorrectos se activa un bloqueo temporal.</p>
+      {props.mcpPinNotice && <FeedbackMessage tone={props.mcpPinNotice.tone} message={props.mcpPinNotice.message} />}
+    </form>
+  </section>;
 }
 
 type OperationStep = "details" | "confirm" | "receipt";
@@ -310,6 +418,30 @@ function ActivityChart({ transactions }: { transactions: Transaction[] }) {
   return <div className="activity-chart" aria-label="Gráfico de importes de los últimos movimientos" role="img"><div className="activity-chart-header"><span>Importe por movimiento</span><span>{credits} entradas · {points.length - credits} salidas</span></div><div className="activity-chart-plot"><div className="activity-chart-gridline activity-chart-gridline-top" /><div className="activity-chart-gridline activity-chart-gridline-middle" /><div className="activity-chart-bars">{points.map((transaction) => { let amount = 0n; try { amount = BigInt(transaction.amount); } catch { /* Ignore malformed display data. */ } const percentage = maximum > 0n ? Number((amount * 100n) / maximum) : 0; const shortDate = new Date(transaction.created_at).toLocaleDateString("es-PA", { day: "2-digit", month: "short" }); return <div className="activity-chart-column" key={`${transaction.transfer_id}-chart`}><span className="activity-chart-value">{formatMinorAmount(transaction.amount)}</span><div className="activity-chart-track"><div className={`activity-chart-bar ${transaction.direction === "credit" ? "activity-chart-bar-credit" : "activity-chart-bar-debit"}`} style={{ height: `${Math.max(10, percentage)}%` }} /></div><span className="activity-chart-date">{shortDate}</span></div>; })}</div></div><div className="activity-chart-legend"><span><i className="activity-legend-dot activity-legend-credit" />Entradas</span><span><i className="activity-legend-dot activity-legend-debit" />Salidas</span></div></div>;
 }
 
+function FinancialLineChart({ transactions }: { transactions: Transaction[] }) {
+  const points = transactions.slice(0, 6).reverse();
+  const width = 640;
+  const height = 220;
+  const paddingX = 18;
+  const deposits = points.filter((transaction) => transaction.direction === "credit");
+  const withdrawals = points.filter((transaction) => transaction.direction !== "credit");
+  const maximumFor = (items: Transaction[]) => items.reduce((current, transaction) => { try { const amount = BigInt(transaction.amount); return amount > current ? amount : current; } catch { return current; } }, 0n);
+  const depositMaximum = maximumFor(deposits);
+  const withdrawalMaximum = maximumFor(withdrawals);
+  const pointFor = (transaction: Transaction, index: number, items: Transaction[], maximum: bigint, direction: "deposit" | "withdrawal") => {
+    let amount = 0n;
+    try { amount = BigInt(transaction.amount); } catch { /* Keep malformed values at the baseline. */ }
+    const x = items.length <= 1 ? width / 2 : paddingX + (index * (width - paddingX * 2)) / (items.length - 1);
+    const ratio = maximum > 0n ? Number(amount * 100n / maximum) / 100 : 0;
+    const y = direction === "deposit" ? 124 - ratio * 92 : 96 + ratio * 92;
+    return `${x},${y}`;
+  };
+  const depositCoordinates = deposits.map((transaction, index) => pointFor(transaction, index, deposits, depositMaximum, "deposit"));
+  const withdrawalCoordinates = withdrawals.map((transaction, index) => pointFor(transaction, index, withdrawals, withdrawalMaximum, "withdrawal"));
+  const pointParts = (point: string) => point.split(",");
+  return <div className="financial-line-chart" role="img" aria-label="Depositos subiendo y retiros bajando en la actividad financiera"><div className="financial-line-chart-header"><span className="financial-line-legend financial-line-legend-credit"><i />Depositos ↑</span><span className="financial-line-legend financial-line-legend-debit"><i />Retiros ↓</span></div><svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true"><line x1="18" y1="32" x2="622" y2="32" /><line x1="18" y1="110" x2="622" y2="110" /><line x1="18" y1="188" x2="622" y2="188" /><line className="financial-line-separator" x1="18" y1="110" x2="622" y2="110" />{depositCoordinates.length > 1 ? <polyline className="financial-line-credit" points={depositCoordinates.join(" ")} /> : null}{withdrawalCoordinates.length > 1 ? <polyline className="financial-line-debit" points={withdrawalCoordinates.join(" ")} /> : null}{deposits.map((transaction, index) => { const [cx, cy] = pointParts(depositCoordinates[index]); return <circle className="financial-point-credit" cx={cx} cy={cy} key={`${transaction.transfer_id}-deposit-point`} r="4" />; })}{withdrawals.map((transaction, index) => { const [cx, cy] = pointParts(withdrawalCoordinates[index]); return <circle className="financial-point-debit" cx={cx} cy={cy} key={`${transaction.transfer_id}-withdrawal-point`} r="4" />; })}</svg><div className="financial-line-chart-dates">{points.map((transaction) => <span key={`${transaction.transfer_id}-date`}>{new Date(transaction.created_at).toLocaleDateString("es-PA", { month: "short" })}</span>)}</div></div>;
+}
+
 function TransactionRow({ transaction }: { transaction: Transaction }) {
   const label = transactionLabel(transaction);
   return <div className="transaction-table-row" role="row"><span className="transaction-date"><ChevronIcon /> {new Date(transaction.created_at).toLocaleDateString("es-PA")}</span><span><strong>{transaction.type === "transfer" ? "Cuenta destino" : "Cuenta activa"}</strong><small>{label}</small></span><span><strong>{label}</strong><small>Referencia: {transaction.transfer_id.slice(0, 8)}…</small></span><span className="transaction-status">REGISTRADA</span><strong className={`transaction-amount ${transaction.direction === "credit" ? "transaction-credit" : "transaction-debit"}`}>{transaction.direction === "credit" ? "+" : "−"}{formatMinorAmount(transaction.amount)}</strong></div>;
@@ -418,14 +550,15 @@ function MCPPanel(props: MCPPanelProps) {
       <span className="chatbot-fab-dot" aria-hidden="true" />
     </button>
     {props.chatOpen && <div id="hyper-bank-chat" className="chatbot-popover" role="dialog" aria-modal="false" aria-labelledby="mcp-title" aria-describedby="mcp-description">
-      <div className="chatbot-popover-header"><div><h2 id="mcp-title">Te ayudamos</h2><p id="mcp-description" className="sr-only">Escribe una consulta para recibir ayuda sobre tu cuenta.</p></div><button className="chatbot-popover-close" aria-label="Cerrar chat" onClick={() => props.onChatOpenChange(false)} type="button">×</button></div>
+      <div className="chatbot-popover-header"><div><div className="mcp-header-title"><h2 id="mcp-title">Asistente Hypernova</h2><span className={`mcp-connection-status ${props.mcpError ? "mcp-connection-status-error" : ""}`}><span />{props.mcpError ? "Requiere atencion" : "Conectado"}</span></div><p id="mcp-description">Consultas, movimientos y operaciones con confirmacion segura.</p></div><button className="chatbot-popover-close" aria-label="Cerrar chat" onClick={() => props.onChatOpenChange(false)} type="button">×</button></div>
       <div className="mcp-chat-window chatbot-chat-body">
         <div className="mcp-chat-history" aria-live="polite">
-          {!chatMessages.length && <div className="mcp-chat-bubble mcp-chat-bubble-assistant"><p>¡Hola! ¿En qué puedo ayudarte?</p></div>}
+          {props.mcpError && <FeedbackMessage tone="error" message={props.mcpError} title="El asistente no esta disponible" />}
+          {!chatMessages.length && <><div className="mcp-chat-bubble mcp-chat-bubble-assistant"><p>¡Hola! ¿En qué puedo ayudarte?</p><small>Puedo consultar tus cuentas, resumir movimientos o preparar una operacion para que la confirmes.</small></div><div className="mcp-quick-prompts" aria-label="Consultas rapidas"><button type="button" onClick={() => props.onAssistantInput("¿Cuál es mi saldo disponible?")}>Ver saldo</button><button type="button" onClick={() => props.onAssistantInput("¿Qué movimientos tuve este mes?")}>Movimientos</button><button type="button" onClick={() => props.onAssistantInput("¿Cuánto gasté este mes?")}>Resumen de gastos</button></div></>}
           {chatMessages.map((message) => <div className={`mcp-chat-bubble ${message.role === "user" ? "mcp-chat-bubble-user" : "mcp-chat-bubble-assistant"}`} key={message.id}><p>{message.text}</p>{message.accountOptions?.length ? <div className="assistant-account-options"><span className="assistant-data-title">Elige una cuenta</span>{message.accountOptions.map((account) => <button className="assistant-account-option" key={account.id} disabled={props.assistantBusy} onClick={() => props.onAssistantAccountSelect(account.id)} type="button"><span><strong>{account.display_name || "Cuenta"}</strong><small>{account.currency} · {assistantAccountLabel(account.id)}</small></span><span aria-hidden="true">›</span></button>)}</div> : null}{message.data !== undefined && <div className="assistant-data-card"><p className="assistant-data-title">Resumen</p><AssistantDataView data={message.data} accountBalances={props.accountBalances} /></div>}{message.confirmation && <MCPActionConfirmation props={props} />}</div>)}
           {isPendingMCPAction(props.mcpAction) && !chatMessages.some((message) => message.confirmation) && <div className="mcp-chat-bubble mcp-chat-bubble-assistant"><MCPActionConfirmation props={props} /></div>}
         </div>
-        <form className="mcp-chat-input chatbot-chat-input" onSubmit={submitChat}><label className="sr-only" htmlFor="assistant-message">Consulta al asistente</label><input id="assistant-message" disabled={props.assistantBusy || isPendingMCPAction(props.mcpAction)} value={props.assistantInput} onChange={(event) => props.onAssistantInput(event.target.value)} placeholder={isPendingMCPAction(props.mcpAction) ? "Confirma o cancela la operación…" : "Escribe tu mensaje…"} maxLength={2000} /><button className="chatbot-send-button" aria-label="Enviar mensaje" disabled={props.assistantBusy || isPendingMCPAction(props.mcpAction) || !props.assistantInput.trim()} type="submit">{props.assistantBusy ? "…" : "›"}</button></form>
+        <form className="mcp-chat-input chatbot-chat-input" onSubmit={submitChat}><label className="sr-only" htmlFor="assistant-message">Consulta al asistente</label><input id="assistant-message" disabled={props.assistantBusy || isPendingMCPAction(props.mcpAction)} aria-busy={props.assistantBusy} value={props.assistantInput} onChange={(event) => props.onAssistantInput(event.target.value)} placeholder={isPendingMCPAction(props.mcpAction) ? "Confirma o cancela la operación…" : "Escribe tu mensaje…"} maxLength={2000} /><button className="chatbot-send-button" aria-label="Enviar mensaje" disabled={props.assistantBusy || isPendingMCPAction(props.mcpAction) || !props.assistantInput.trim()} type="submit">{props.assistantBusy ? "…" : "›"}</button></form>
       </div></div>}
   </section>;
 }

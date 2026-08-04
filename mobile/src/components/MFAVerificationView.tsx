@@ -18,7 +18,7 @@ export function MFAVerificationView(props: MFAVerificationViewProps) {
   const validCode = props.code.length === 6;
 
   return (
-    <SafeAreaView className="flex-1 bg-[#f7f9fb]">
+    <SafeAreaView className="flex-1 bg-[#f7f9fb] dark:bg-[#07111f]">
       <KeyboardAvoidingView className="flex-1" behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: "center", padding: 20 }} keyboardShouldPersistTaps="handled">
           <View className="mb-8 items-center">
@@ -28,7 +28,7 @@ export function MFAVerificationView(props: MFAVerificationViewProps) {
             <Text className="mt-3 text-lg font-bold text-[#1e315f]">Hyper Bank</Text>
           </View>
 
-          <View className="rounded-3xl bg-white p-6 shadow-sm">
+          <View className="rounded-[28px] border border-slate-200 bg-white p-6 shadow-sm dark:border-[#213a55] dark:bg-[#0d1b2a]">
             <Text className="text-center text-xs font-bold uppercase tracking-[2px] text-[#5b20a3]">Verificación de seguridad</Text>
             <Text className="mt-3 text-center text-3xl font-semibold text-[#1e315f]">Confirma tu identidad</Text>
             <Text className="mt-3 text-center text-sm leading-6 text-slate-500">

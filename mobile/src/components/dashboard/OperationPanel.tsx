@@ -1,6 +1,8 @@
 import { Pressable, Text, TextInput, View } from "react-native";
 import { Account, OperationMode } from "../../api";
 import { currencyInputToMinor, sanitizeCurrencyInput } from "../../money";
+import { FeedbackMessage } from "../feedback/FeedbackMessage";
+import { MobileFeedback } from "./types";
 
 interface Props {
   accounts: Account[];
@@ -13,7 +15,7 @@ interface Props {
   mcpPinConfigured: boolean;
   mcpActionPending: boolean;
   busy: boolean;
-  notice: string;
+  notice: MobileFeedback | null;
   onMode: (mode: OperationMode) => void;
   onAmount: (value: string) => void;
   onDestination: (value: string) => void;
@@ -96,8 +98,8 @@ export function OperationPanel(props: Props) {
       ) : null}
 
       <Text className="mt-4 rounded-2xl bg-slate-50 p-4 text-xs leading-5 text-slate-500 dark:bg-[#1d3047] dark:text-slate-300">{props.mode === "deposit" ? "Agrega fondos a la cuenta que elijas." : props.mode === "withdrawal" ? "Retira solo fondos disponibles." : "Revisa origen, destino y monto antes de confirmar."}</Text>
-      {props.mcpActionPending ? <Text className="mt-3 rounded-xl bg-blue-50 p-3 text-sm text-blue-800 dark:bg-blue-950 dark:text-blue-200">Finaliza o cancela la operación pendiente desde el asistente antes de iniciar otra.</Text> : null}
-      {props.notice ? <Text className="mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950 dark:text-amber-200">{props.notice}</Text> : null}
+      {props.mcpActionPending ? <FeedbackMessage tone="info" message="Finaliza o cancela la operación pendiente desde el asistente antes de iniciar otra." /> : null}
+      {props.notice ? <FeedbackMessage tone={props.notice.tone} message={props.notice.message} /> : null}
       <Pressable className="mt-4 rounded-full bg-[#16c1b5] px-5 py-4" disabled={props.mcpActionPending || props.busy || !canSubmit} onPress={props.onSubmit}>
         <Text className="text-center font-semibold text-[#24315e]">{props.busy ? "Procesando…" : "Confirmar operación"}</Text>
       </Pressable>

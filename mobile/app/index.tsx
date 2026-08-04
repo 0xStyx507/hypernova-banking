@@ -3,12 +3,13 @@ import { useEffect, useState } from "react";
 import { Linking } from "react-native";
 import { useColorScheme as useNativeColorScheme } from "nativewind";
 import { Account, Balance, History, MCPAction, MFAEnrollment, MFAStatus, MobileApiError, OAuthProvider, OperationMode, User, createIdempotencyKey, mobileApi } from "../src/api";
-import { maskEmail, sanitizeMfaCode } from "../src/auth";
+import { isValidEmail, maskEmail, sanitizeMfaCode } from "../src/auth";
 import { AuthView } from "../src/components/AuthView";
 import { MFAOnboarding } from "../src/components/MFAOnboarding";
 import { MFAStatusGate } from "../src/components/MFAStatusGate";
 import { MFAVerificationView } from "../src/components/MFAVerificationView";
 import { MobileDashboard } from "../src/components/dashboard/MobileDashboard";
+import { MobileFeedback } from "../src/components/dashboard/types";
 import { DashboardSection } from "../src/types";
 import { currencyInputToMinor } from "../src/money";
 
@@ -21,12 +22,17 @@ const sessionKey = "hypernova.mobile.session";
 /** Mobile entry screen: authentication, balance, operations, history and MFA. */
 export default function HomeScreen() {
   const colorScheme = useNativeColorScheme();
+  useEffect(() => {
+    colorScheme.setColorScheme("dark");
+    // The attached Hypernova mockup defines dark as the initial mobile appearance.
+  }, []);
   const [session, setSession] = useState<Session | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authNeedsMFA, setAuthNeedsMFA] = useState(false);
   const [oauthPending, setOauthPending] = useState<{ provider: OAuthProvider; code: string } | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [fullName, setFullName] = useState("");
   const [authMFA, setAuthMFA] = useState("");
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -44,6 +50,7 @@ export default function HomeScreen() {
   const [transferTargetType, setTransferTargetType] = useState<"own" | "external">("own");
   const [transferConfirmationPin, setTransferConfirmationPin] = useState("");
   const [busy, setBusy] = useState(false);
+  const [operationNotice, setOperationNotice] = useState<MobileFeedback | null>(null);
   const [notice, setNotice] = useState("");
   const [mfaStatus, setMfaStatus] = useState<MFAStatus | null>(null);
   const [mfaEnrollment, setMfaEnrollment] = useState<MFAEnrollment | null>(null);
@@ -59,6 +66,7 @@ export default function HomeScreen() {
   const [profileNotice, setProfileNotice] = useState("");
   const [mcpPin, setMcpPin] = useState("");
   const [mcpPinConfigured, setMcpPinConfigured] = useState(false);
+  const [mcpPinExpiresAt, setMcpPinExpiresAt] = useState<string | undefined>();
   const [mcpPinBusy, setMcpPinBusy] = useState(false);
   const [mcpPinNotice, setMcpPinNotice] = useState("");
   const [mcpActionPending, setMcpActionPending] = useState(false);
@@ -67,9 +75,6 @@ export default function HomeScreen() {
   useEffect(() => {
     void restoreSession();
   }, []);
-  useEffect(() => {
-    colorScheme.setColorScheme("light");
-  }, [colorScheme]);
   useEffect(() => {
     const consumeOAuthUrl = (url: string) => {
       const query = new URL(url).searchParams;
@@ -96,6 +101,13 @@ export default function HomeScreen() {
   useEffect(() => { if (session) void loadMFA(session); }, [session]);
   useEffect(() => { if (session && mfaStatus?.enabled) void loadDashboard(session); }, [session, mfaStatus?.enabled]);
   useEffect(() => { if (session && mfaStatus?.enabled) void loadMCPPIN(); }, [session, mfaStatus?.enabled]);
+  useEffect(() => {
+    if (!mcpPinConfigured || !mcpPinExpiresAt) return undefined;
+    const remaining = new Date(mcpPinExpiresAt).getTime() - Date.now();
+    if (remaining <= 0) { setMcpPinConfigured(false); setMcpPinExpiresAt(undefined); return undefined; }
+    const timer = setTimeout(() => { setMcpPinConfigured(false); setMcpPinExpiresAt(undefined); setMcpPinNotice("El PIN vencio. Crea uno nuevo para confirmar operaciones."); }, remaining);
+    return () => clearTimeout(timer);
+  }, [mcpPinConfigured, mcpPinExpiresAt]);
 
   async function restoreSession() {
     const stored = await SecureStore.getItemAsync(sessionKey);
@@ -123,13 +135,20 @@ export default function HomeScreen() {
   }
 
   async function authenticate() {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!isValidEmail(normalizedEmail)) { setNotice("Escribe un correo electrónico válido."); return; }
+    if (authMode === "register") {
+      if (fullName.trim().length < 2) { setNotice("Escribe tu nombre completo."); return; }
+      if (password.length < 8 || password.length > 72) { setNotice("La contraseña debe tener entre 8 y 72 caracteres."); return; }
+      if (password !== passwordConfirmation) { setNotice("Las contraseñas no coinciden."); return; }
+    }
     setBusy(true); setNotice("");
     try {
       const tokens = oauthPending
         ? await mobileApi.exchangeOAuth(oauthPending.provider, oauthPending.code, authMFA)
-        : (authMode === "register" ? (await mobileApi.register({ email, password, full_name: fullName }), await mobileApi.login({ email, password, mfa_code: authMFA || undefined })) : await mobileApi.login({ email, password, mfa_code: authMFA || undefined }));
+        : (authMode === "register" ? (await mobileApi.register({ email: normalizedEmail, password, full_name: fullName.trim() }), await mobileApi.login({ email: normalizedEmail, password, mfa_code: authMFA || undefined })) : await mobileApi.login({ email: normalizedEmail, password, mfa_code: authMFA || undefined }));
       await saveSession({ accessToken: tokens.access_token, refreshToken: tokens.refresh_token, user: tokens.user });
-      setPassword(""); setAuthMFA(""); setAuthNeedsMFA(false); setOauthPending(null);
+      setPassword(""); setPasswordConfirmation(""); setAuthMFA(""); setAuthNeedsMFA(false); setOauthPending(null);
     } catch (error) {
       if (error instanceof MobileApiError && error.body.code === "mfa_required") {
         setAuthNeedsMFA(true);
@@ -182,16 +201,17 @@ export default function HomeScreen() {
     finally { setAccountRenameBusyId(""); }
   }
 
+
   async function loadMCPPIN() {
     if (!session || !mfaStatus?.enabled) return;
-    try { const status = await mobileApi.mcpPINStatus(session.accessToken); const pending = await mobileApi.getPendingMCPAction(session.accessToken); setMcpPinConfigured(status.configured); setMcpAction(pending.action); setMcpActionPending(pending.action?.status === "ready"); }
+    try { const status = await mobileApi.mcpPINStatus(session.accessToken); const pending = await mobileApi.getPendingMCPAction(session.accessToken); setMcpPinConfigured(status.configured); setMcpPinExpiresAt(status.expires_at); setMcpAction(pending.action); setMcpActionPending(pending.action?.status === "ready"); }
     catch (error) { setMcpPinNotice(publicError(error)); }
   }
 
   async function saveMCPPIN() {
     if (!session || !/^\d{4}$/u.test(mcpPin)) { setMcpPinNotice("El PIN debe contener exactamente cuatro dígitos."); return; }
     setMcpPinBusy(true); setMcpPinNotice("");
-    try { await mobileApi.setMCPPIN(mcpPin, session.accessToken); setMcpPin(""); setMcpPinConfigured(true); setMcpPinNotice("PIN activo durante tres minutos."); }
+    try { const status = await mobileApi.setMCPPIN(mcpPin, session.accessToken); setMcpPin(""); setMcpPinConfigured(status.configured); setMcpPinExpiresAt(status.expires_at); setMcpPinNotice("PIN activo durante tres minutos."); }
     catch (error) { setMcpPinNotice(publicError(error)); }
     finally { setMcpPinBusy(false); }
   }
@@ -238,15 +258,15 @@ export default function HomeScreen() {
   async function submitOperation() {
     if (!session || !account || !amount) return;
     const minorAmount = currencyInputToMinor(amount);
-    if (!minorAmount || minorAmount === "0") { setNotice("Escribe un monto válido mayor que USD 0.00."); return; }
-    setBusy(true); setNotice("");
+    if (!minorAmount || minorAmount === "0") { setOperationNotice({ tone: "error", message: "Escribe un monto válido mayor que USD 0.00." }); return; }
+    setBusy(true); setOperationNotice(null);
     try {
       const key = createIdempotencyKey();
       if (mode === "deposit") await mobileApi.deposit(account.id, minorAmount, session.accessToken, key);
       if (mode === "withdrawal") await mobileApi.withdraw(account.id, minorAmount, session.accessToken, key);
       if (mode === "transfer") await mobileApi.transfer(account.id, destination, minorAmount, session.accessToken, key, transferTargetType === "external" ? transferConfirmationPin : undefined, transferTargetType);
-      setAmount(""); setDestination(""); setTransferConfirmationPin(""); setNotice("Operación registrada correctamente."); await loadDashboard(session);
-    } catch (error) { setNotice(publicError(error)); } finally { setBusy(false); }
+      setAmount(""); setDestination(""); setTransferConfirmationPin(""); setOperationNotice({ tone: "success", message: "La operación fue registrada correctamente." }); await loadDashboard(session);
+    } catch (error) { setOperationNotice({ tone: "error", message: publicError(error) }); } finally { setBusy(false); }
   }
 
   async function beginMFA() {
@@ -281,13 +301,13 @@ export default function HomeScreen() {
 
   if (!session && (authNeedsMFA || oauthPending)) return <MFAVerificationView accountLabel={email ? maskEmail(email) : "tu cuenta"} code={authMFA} busy={busy} notice={notice} onCodeChange={(value) => { setAuthMFA(sanitizeMfaCode(value)); setNotice(""); }} onSubmit={authenticate} onBack={() => { setAuthNeedsMFA(false); setOauthPending(null); setAuthMFA(""); setNotice(""); }} />;
 
-  if (!session) return <AuthView mode={authMode} setMode={(next) => { setAuthMode(next); setNotice(""); setAuthNeedsMFA(false); setOauthPending(null); }} email={email} setEmail={setEmail} password={password} setPassword={setPassword} fullName={fullName} setFullName={setFullName} busy={busy} notice={notice} onSubmit={authenticate} onOAuth={(provider) => { setBusy(true); void Linking.openURL(mobileApi.oauthStartUrl(provider, "hypernova://oauth")).catch((error) => setNotice(publicError(error))).finally(() => setBusy(false)); }} />;
+  if (!session) return <AuthView mode={authMode} setMode={(next) => { setAuthMode(next); setPasswordConfirmation(""); setNotice(""); setAuthNeedsMFA(false); setOauthPending(null); }} email={email} setEmail={setEmail} password={password} setPassword={setPassword} passwordConfirmation={passwordConfirmation} setPasswordConfirmation={setPasswordConfirmation} fullName={fullName} setFullName={setFullName} busy={busy} notice={notice} onSubmit={authenticate} onOAuth={(provider) => { setBusy(true); void Linking.openURL(mobileApi.oauthStartUrl(provider, "hypernova://oauth")).catch((error) => setNotice(publicError(error))).finally(() => setBusy(false)); }} />;
 
   if (!mfaStatus) return <MFAStatusGate loading={mfaLoading} notice={mfaCheckError} onRetry={() => { void loadMFA(session); }} onLogout={logout} />;
 
   if (!mfaStatus.enabled) return <MFAOnboarding user={session.user} enrollment={mfaEnrollment} code={mfaCode} busy={mfaBusy} loading={mfaLoading} notice={notice} onCodeChange={setMfaCode} onBegin={beginMFA} onVerify={verifyMFA} onLogout={logout} />;
 
-  return <MobileDashboard user={session.user} accessToken={session.accessToken} accounts={accounts} accountBalances={accountBalances} activeAccount={account} balance={balance} history={history} historyPage={historyPage} historyBusy={historyBusy} hasMoreHistory={Boolean(history?.has_more)} section={section} operationMode={mode} operationAmount={amount} destinationAccountId={destination} transferTargetType={transferTargetType} transferConfirmationPin={transferConfirmationPin} operationBusy={busy} notice={notice} accountBusy={accountBusy} accountNotice={accountNotice} accountRenameBusyId={accountRenameBusyId} profileFullName={profileFullName || session.user.full_name} profileBusy={profileBusy} profileNotice={profileNotice} mcpPin={mcpPin} mcpPinConfigured={mcpPinConfigured} mcpPinBusy={mcpPinBusy} mcpPinNotice={mcpPinNotice} mcpActionPending={mcpActionPending} mcpAction={mcpAction} onNavigate={navigateDashboard} onAccountChange={(accountId) => { void selectAccount(accountId); }} onCreateAccount={() => { void createAccount(); }} onRenameAccount={(accountId, name) => { void renameAccount(accountId, name); }} onOperationModeChange={(nextMode) => { setMode(nextMode); setNotice(""); }} onAmountChange={setAmount} onDestinationChange={setDestination} onTransferTargetTypeChange={(target) => { setTransferTargetType(target); setDestination(""); setTransferConfirmationPin(""); }} onTransferConfirmationPinChange={(pin) => setTransferConfirmationPin(pin)} onOperation={() => { void submitOperation(); }} onNextHistory={() => { void nextHistory(); }} onPreviousHistory={previousHistory} onProfileNameChange={setProfileFullName} onProfileSubmit={() => { void updateProfile(); }} onMCPPINChange={(pin) => setMcpPin(pin.replace(/\D/g, "").slice(0, 4))} onSetMCPPIN={() => { void saveMCPPIN(); }} onLogout={() => { void logout(); }} onMCPActionPendingChange={setMcpActionPending} onMCPActionExpired={() => { setMcpAction(null); setMcpActionPending(false); setNotice("La operación pendiente expiró. Puedes iniciar otra operación."); }} onMCPActionConfirmed={(action) => { setMcpAction(action); setMcpActionPending(false); const accountID = action.payload.account_id || action.payload.source_account_id; const selected = accountID ? accounts.find((item) => item.id === accountID) : undefined; if (selected && session) { setAccount(selected); void loadAccountData(selected.id, session.accessToken).then(() => new Promise((resolve) => setTimeout(resolve, 250))).then(() => loadAccountData(selected.id, session.accessToken)); } else if (session) void loadDashboard(session); }} />;
+  return <MobileDashboard user={session.user} accessToken={session.accessToken} accounts={accounts} accountBalances={accountBalances} activeAccount={account} balance={balance} history={history} historyPage={historyPage} historyBusy={historyBusy} hasMoreHistory={Boolean(history?.has_more)} section={section} operationMode={mode} operationAmount={amount} destinationAccountId={destination} transferTargetType={transferTargetType} transferConfirmationPin={transferConfirmationPin} operationBusy={busy} operationNotice={operationNotice} notice={notice} accountBusy={accountBusy} accountNotice={accountNotice} accountRenameBusyId={accountRenameBusyId} profileFullName={profileFullName || session.user.full_name} profileBusy={profileBusy} profileNotice={profileNotice} mcpPin={mcpPin} mcpPinConfigured={mcpPinConfigured} mcpPinExpiresAt={mcpPinExpiresAt} mcpPinBusy={mcpPinBusy} mcpPinNotice={mcpPinNotice} mcpActionPending={mcpActionPending} mcpAction={mcpAction} onNavigate={navigateDashboard} onThemeToggle={() => colorScheme.toggleColorScheme()} onAccountChange={(accountId) => { void selectAccount(accountId); }} onCreateAccount={() => { void createAccount(); }} onRenameAccount={(accountId, name) => { void renameAccount(accountId, name); }} onOperationModeChange={(nextMode) => { setMode(nextMode); setOperationNotice(null); setNotice(""); }} onAmountChange={setAmount} onDestinationChange={setDestination} onTransferTargetTypeChange={(target) => { setTransferTargetType(target); setDestination(""); setTransferConfirmationPin(""); }} onTransferConfirmationPinChange={(pin) => setTransferConfirmationPin(pin)} onOperation={() => { void submitOperation(); }} onNextHistory={() => { void nextHistory(); }} onPreviousHistory={previousHistory} onProfileNameChange={setProfileFullName} onProfileSubmit={() => { void updateProfile(); }} onMCPPINChange={(pin) => setMcpPin(pin.replace(/\D/g, "").slice(0, 4))} onSetMCPPIN={() => { void saveMCPPIN(); }} onLogout={() => { void logout(); }} onMCPActionPendingChange={setMcpActionPending} onMCPActionExpired={() => { setMcpAction(null); setMcpActionPending(false); setOperationNotice({ tone: "error", message: "La operación pendiente expiró. Puedes iniciar otra operación." }); }} onMCPActionConfirmed={(action) => { setMcpAction(action); setMcpActionPending(false); const accountID = action.payload.account_id || action.payload.source_account_id; const selected = accountID ? accounts.find((item) => item.id === accountID) : undefined; if (selected && session) { setAccount(selected); void loadAccountData(selected.id, session.accessToken).then(() => new Promise((resolve) => setTimeout(resolve, 250))).then(() => loadAccountData(selected.id, session.accessToken)); } else if (session) void loadDashboard(session); }} />;
 }
 
 
